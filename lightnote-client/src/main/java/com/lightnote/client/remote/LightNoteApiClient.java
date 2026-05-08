@@ -1,0 +1,150 @@
+package com.lightnote.client.remote;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lightnote.client.model.Note;
+import com.lightnote.client.model.SyncStatus;
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class LightNoteApiClient {
+
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(8))
+            .build();
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final String serverUrl;
+
+    public LightNoteApiClient(String serverUrl) {
+        this.serverUrl = trimTrailingSlash(serverUrl);
+    }
+
+    public LoginResponse login(String username, String password) {
+        Map<String, String> body = Map.of("username", username, "password", password);
+        JsonNode data = sendJson("POST", "/api/auth/login", null, body);
+        return new LoginResponse(data.path("token").asText(), data.path("expireSeconds").asLong());
+    }
+
+    public SyncPushResponse push(String token, long lastSyncVersion, List<Note> notes) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("lastSyncVersion", lastSyncVersion);
+        body.put("notes", notes.stream().map(this::toSyncNoteRequest).toList());
+        JsonNode data = sendJson("POST", "/api/sync/push", token, body);
+        return parsePushResponse(data);
+    }
+
+    public SyncChangesResponse changes(String token, long sinceVersion, int limit) {
+        JsonNode data = sendJson("GET", "/api/sync/changes?sinceVersion=" + sinceVersion + "&limit=" + limit, token, null);
+        List<RemoteNote> notes = new ArrayList<>();
+        for (JsonNode item : data.withArray("notes")) {
+            notes.add(parseRemoteNote(item));
+        }
+        return new SyncChangesResponse(data.path("serverVersion").asLong(), data.path("hasMore").asBoolean(), notes);
+    }
+
+    private Map<String, Object> toSyncNoteRequest(Note note) {
+        Map<String, Object> item = new HashMap<>();
+        item.put("noteUuid", note.getNoteUuid());
+        item.put("operation", note.getSyncStatus() == SyncStatus.DELETE_PENDING ? "DELETE" : note.getObjectVersion() == 0 ? "CREATE" : "UPDATE");
+        item.put("baseObjectVersion", note.getObjectVersion());
+        item.put("title", note.getTitle());
+        item.put("content", note.getContent());
+        item.put("summary", note.getSummary());
+        item.put("categoryName", note.getCategoryName());
+        item.put("pinned", note.isPinned());
+        item.put("favorite", note.isFavorite());
+        item.put("archived", note.isArchived());
+        item.put("deleted", note.isDeleted());
+        item.put("clientUpdateTime", note.getUpdateTime());
+        return item;
+    }
+
+    private SyncPushResponse parsePushResponse(JsonNode data) {
+        List<SyncItemResult> successItems = new ArrayList<>();
+        for (JsonNode item : data.withArray("successItems")) {
+            successItems.add(new SyncItemResult(
+                    item.path("noteUuid").asText(),
+                    item.path("objectVersion").asLong(),
+                    item.path("serverVersion").asLong()
+            ));
+        }
+        List<SyncConflictItem> conflictItems = new ArrayList<>();
+        for (JsonNode item : data.withArray("conflictItems")) {
+            conflictItems.add(new SyncConflictItem(
+                    item.path("noteUuid").asText(),
+                    item.path("clientBaseObjectVersion").asLong(),
+                    item.path("serverObjectVersion").asLong(),
+                    parseRemoteNote(item.path("serverNote"))
+            ));
+        }
+        return new SyncPushResponse(data.path("serverVersion").asLong(), successItems, conflictItems);
+    }
+
+    private RemoteNote parseRemoteNote(JsonNode item) {
+        return new RemoteNote(
+                item.path("noteUuid").asText(),
+                item.path("operation").asText("UPDATE"),
+                item.path("objectVersion").asLong(),
+                item.path("serverVersion").asLong(),
+                item.path("title").asText(""),
+                item.path("content").asText(""),
+                item.path("summary").asText(""),
+                item.path("categoryName").asText(""),
+                item.path("pinned").asBoolean(),
+                item.path("favorite").asBoolean(),
+                item.path("archived").asBoolean(),
+                item.path("deleted").asBoolean(),
+                textOrNull(item.path("createTime")),
+                textOrNull(item.path("updateTime")),
+                textOrNull(item.path("deleteTime"))
+        );
+    }
+
+    private JsonNode sendJson(String method, String path, String token, Object body) {
+        try {
+            HttpRequest.Builder builder = HttpRequest.newBuilder()
+                    .uri(URI.create(serverUrl + path))
+                    .timeout(Duration.ofSeconds(20));
+            if (token != null && !token.isBlank()) {
+                builder.header("Authorization", "Bearer " + token);
+            }
+            if (body == null) {
+                builder.GET();
+            } else {
+                builder.header("Content-Type", "application/json");
+                builder.method(method, HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)));
+            }
+            HttpResponse<String> response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+            JsonNode root = objectMapper.readTree(response.body());
+            if (response.statusCode() < 200 || response.statusCode() >= 300 || root.path("code").asInt(-1) != 0) {
+                throw new ApiException(root.path("message").asText("HTTP " + response.statusCode()));
+            }
+            return root.path("data");
+        } catch (IOException ex) {
+            throw new ApiException("网络请求失败", ex);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new ApiException("网络请求被中断", ex);
+        }
+    }
+
+    private String textOrNull(JsonNode node) {
+        return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
+    }
+
+    private String trimTrailingSlash(String value) {
+        String trimmed = value == null ? "" : value.trim();
+        while (trimmed.endsWith("/")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed;
+    }
+}

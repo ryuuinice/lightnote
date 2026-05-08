@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: lightnote-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: change_this_root_password
+      MYSQL_DATABASE: lightnote
+      MYSQL_USER: lightnote
+      MYSQL_PASSWORD: change_this_password
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    networks:
+      - lightnote-net
+
+  server:
+    image: eclipse-temurin:17-jre
+    container_name: lightnote-server
+    restart: always
+    depends_on:
+      - mysql
+    volumes:
+      - ./server:/app
+      - ./logs:/logs
+    working_dir: /app
+    command: java -jar lightnote-server.jar
+    ports:
+      - "8080:8080"
+    networks:
+      - lightnote-net
+
+networks:
+  lightnote-net:
+    driver: bridge

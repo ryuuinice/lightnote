@@ -1,0 +1,25 @@
+spring:
+  application:
+    name: lightnote-server
+  datasource:
+    url: ${LIGHTNOTE_DB_URL:jdbc:mariadb://10.10.5.57:3306/lightnote?useUnicode=true&characterEncoding=utf8}
+    username: ${LIGHTNOTE_DB_USERNAME:lightnote}
+    password: ${LIGHTNOTE_DB_PASSWORD:lightnote}
+    driver-class-name: ${LIGHTNOTE_DB_DRIVER:org.mariadb.jdbc.Driver}
+
+server:
+  port: ${LIGHTNOTE_SERVER_PORT:8080}
+
+mybatis:
+  mapper-locations: classpath:/mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.lightnote.server: info
+
+lightnote:
+  jwt:
+    secret: ${LIGHTNOTE_JWT_SECRET:please-change-this-development-secret-to-at-least-32-characters}
+    expire-seconds: ${LIGHTNOTE_JWT_EXPIRE_SECONDS:7200}

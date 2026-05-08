@@ -1,0 +1,7 @@
+.idea/
+*/target/
+*.log
+*.tmp
+*.class
+Thumbs.db
+Desktop.ini

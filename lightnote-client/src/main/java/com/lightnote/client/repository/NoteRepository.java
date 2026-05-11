@@ -23,6 +23,7 @@ import java.util.UUID;
 public class NoteRepository {
 
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
+    private static final String CONFLICT_COPY_MARKER = " - 冲突副本 - ";
 
     private final Path databasePath;
 
@@ -56,6 +57,7 @@ public class NoteRepository {
             case RECENT_7_DAYS -> "is_deleted = 0 AND is_archived = 0 AND substr(update_time, 1, 10) >= date('now', '-7 days', 'localtime')";
             case FAVORITES -> "is_deleted = 0 AND is_archived = 0 AND is_favorite = 1";
             case ARCHIVED -> "is_deleted = 0 AND is_archived = 1";
+            case CONFLICT_COPIES -> "is_deleted = 0 AND title LIKE '%" + CONFLICT_COPY_MARKER + "%'";
             case ALL -> "is_deleted = 0 AND is_archived = 0";
         };
 
@@ -253,7 +255,7 @@ public class NoteRepository {
         Note copy = new Note();
         String now = now();
         copy.setNoteUuid(UUID.randomUUID().toString());
-        copy.setTitle(local.getTitle() + " - 冲突副本 - " + now.replace(":", "").replace("-", "").replace("T", "-"));
+        copy.setTitle(local.getTitle() + CONFLICT_COPY_MARKER + now.replace(":", "").replace("-", "").replace("T", "-"));
         copy.setContent(local.getContent());
         copy.setSummary(local.getSummary());
         copy.setCategoryName(local.getCategoryName());

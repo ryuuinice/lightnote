@@ -5,5 +5,6 @@ public enum NoteFilter {
     TODAY,
     RECENT_7_DAYS,
     FAVORITES,
-    ARCHIVED
+    ARCHIVED,
+    CONFLICT_COPIES
 }

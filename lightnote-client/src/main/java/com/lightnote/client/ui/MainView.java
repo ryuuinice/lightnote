@@ -36,6 +36,7 @@ import javafx.util.Duration;
 public class MainView {
 
     private static final String NOTE_EDITOR_DIVIDER_KEY = "note_editor_divider_position";
+    private static final String CONFLICT_COPY_MARKER = " - 冲突副本 - ";
 
     private static final String EDITOR_STYLE = """
             <style id="lightnote-editor-style">
@@ -151,6 +152,7 @@ public class MainView {
         Button today = navButton("今天", NoteFilter.TODAY);
         Button week = navButton("最近 7 天", NoteFilter.RECENT_7_DAYS);
         Button favorites = navButton("收藏", NoteFilter.FAVORITES);
+        Button conflicts = navButton("冲突", NoteFilter.CONFLICT_COPIES);
         Button archive = navButton("归档", NoteFilter.ARCHIVED);
 
         Label categoryTitle = new Label("分类");
@@ -175,6 +177,7 @@ public class MainView {
                 today,
                 week,
                 favorites,
+                conflicts,
                 archive,
                 new Separator(),
                 categoryTitle,
@@ -583,7 +586,7 @@ public class MainView {
         switch (note.getSyncStatus()) {
             case SYNCED -> setSyncLamp("synced", "已同步");
             case SYNCING -> setSyncLamp("syncing", "同步中");
-            case DIRTY -> setSyncLamp("unsynced", "待同步");
+            case DIRTY -> setSyncLamp("unsynced", isConflictCopy(note) ? "冲突副本，待同步" : "待同步");
             case CONFLICT -> setSyncLamp("unsynced", "冲突");
             case DELETE_PENDING -> setSyncLamp("unsynced", "待删除");
         }
@@ -682,6 +685,12 @@ public class MainView {
         return Math.max(0.22, Math.min(0.55, value));
     }
 
+    private boolean isConflictCopy(Note note) {
+        return note != null
+                && note.getTitle() != null
+                && note.getTitle().contains(CONFLICT_COPY_MARKER);
+    }
+
     private static class NoteCardCell extends ListCell<Note> {
 
         @Override
@@ -746,6 +755,9 @@ public class MainView {
         }
 
         private static String syncTooltipText(Note note) {
+            if (isConflictCopy(note)) {
+                return "冲突副本，待同步";
+            }
             return switch (note.getSyncStatus()) {
                 case SYNCED -> "已同步";
                 case SYNCING -> "同步中";
@@ -766,6 +778,12 @@ public class MainView {
 
         private static String sanitizePreview(String value) {
             return HtmlTextExtractor.toPlainText(value).replaceAll("\\s+", " ").strip();
+        }
+
+        private static boolean isConflictCopy(Note note) {
+            return note != null
+                    && note.getTitle() != null
+                    && note.getTitle().contains(CONFLICT_COPY_MARKER);
         }
     }
 }

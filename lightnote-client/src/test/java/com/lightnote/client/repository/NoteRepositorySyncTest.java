@@ -196,4 +196,23 @@ class NoteRepositorySyncTest {
         assertEquals("<p>local content</p>", conflictCopy.getContent());
         assertEquals(SyncStatus.DIRTY, conflictCopy.getSyncStatus());
     }
+
+    @Test
+    void conflictFilterReturnsOnlyConflictCopies() {
+        Note normal = repository.createEmpty();
+        normal.setTitle("Normal");
+        normal.setContent("<p>normal</p>");
+        repository.save(normal);
+
+        Note source = repository.createEmpty();
+        source.setTitle("Server note");
+        source.setContent("<p>local conflict</p>");
+        repository.save(source);
+        repository.createConflictCopy(repository.findByUuid(source.getNoteUuid()));
+
+        List<Note> conflicts = repository.listByFilter("", NoteFilter.CONFLICT_COPIES);
+
+        assertEquals(1, conflicts.size());
+        assertEquals(true, conflicts.get(0).getTitle().contains("冲突副本"));
+    }
 }

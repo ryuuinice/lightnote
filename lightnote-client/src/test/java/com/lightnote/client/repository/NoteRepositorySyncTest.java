@@ -7,6 +7,7 @@ import com.lightnote.client.model.Note;
 import com.lightnote.client.model.NoteFilter;
 import com.lightnote.client.model.SyncStatus;
 import com.lightnote.client.remote.RemoteNote;
+import com.lightnote.client.remote.SyncConflictItem;
 import com.lightnote.client.remote.SyncItemResult;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -143,5 +144,56 @@ class NoteRepositorySyncTest {
                 .filter(item -> item.getTitle().contains("冲突副本"))
                 .count();
         assertEquals(1, conflictCopies);
+    }
+
+    @Test
+    void resolveConflictRestoresServerVersionWhileKeepingConflictCopySeparate() {
+        Note note = repository.createEmpty();
+        note.setTitle("Local title");
+        note.setContent("<p>local content</p>");
+        repository.save(note);
+
+        Note localBeforeResolve = repository.findByUuid(note.getNoteUuid());
+        assertNotNull(localBeforeResolve);
+        repository.createConflictCopy(localBeforeResolve);
+        repository.resolveConflict(new SyncConflictItem(
+                note.getNoteUuid(),
+                1L,
+                3L,
+                new RemoteNote(
+                        note.getNoteUuid(),
+                        "UPDATE",
+                        3L,
+                        10L,
+                        "Server title",
+                        "<p>server content</p>",
+                        "server content",
+                        "ops",
+                        false,
+                        true,
+                        false,
+                        false,
+                        "2026-05-08T10:00:00",
+                        "2026-05-08T10:30:00",
+                        null
+                )
+        ));
+
+        Note resolved = repository.findByUuid(note.getNoteUuid());
+        assertNotNull(resolved);
+        assertEquals("Server title", resolved.getTitle());
+        assertEquals("<p>server content</p>", resolved.getContent());
+        assertEquals(3L, resolved.getObjectVersion());
+        assertEquals(10L, resolved.getServerVersion());
+        assertEquals(SyncStatus.SYNCED, resolved.getSyncStatus());
+
+        List<Note> notes = repository.listByFilter("", NoteFilter.ALL);
+        assertEquals(2, notes.size());
+        Note conflictCopy = notes.stream()
+                .filter(item -> item.getTitle().contains("冲突副本"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("<p>local content</p>", conflictCopy.getContent());
+        assertEquals(SyncStatus.DIRTY, conflictCopy.getSyncStatus());
     }
 }

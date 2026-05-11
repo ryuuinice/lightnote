@@ -46,6 +46,7 @@ public class ClientSyncService {
             if (local != null) {
                 noteRepository.createConflictCopy(local);
             }
+            noteRepository.resolveConflict(conflict);
         }
 
         int pulled = 0;

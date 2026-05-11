@@ -4,6 +4,7 @@ import com.lightnote.client.model.Note;
 import com.lightnote.client.model.NoteFilter;
 import com.lightnote.client.model.SyncStatus;
 import com.lightnote.client.remote.RemoteNote;
+import com.lightnote.client.remote.SyncConflictItem;
 import com.lightnote.client.remote.SyncItemResult;
 import com.lightnote.client.util.HtmlTextExtractor;
 import java.nio.file.Path;
@@ -280,6 +281,13 @@ public class NoteRepository {
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to create conflict copy", ex);
         }
+    }
+
+    public void resolveConflict(SyncConflictItem conflict) {
+        if (conflict == null || conflict.serverNote() == null) {
+            return;
+        }
+        updateRemote(conflict.serverNote());
     }
 
     private void insertRemote(RemoteNote remote) {

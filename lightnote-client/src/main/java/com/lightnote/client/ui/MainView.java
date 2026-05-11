@@ -5,6 +5,7 @@ import com.lightnote.client.model.NoteFilter;
 import com.lightnote.client.repository.AppConfigRepository;
 import com.lightnote.client.repository.NoteRepository;
 import com.lightnote.client.sync.ClientSyncService;
+import com.lightnote.client.util.HtmlContentSanitizer;
 import com.lightnote.client.util.HtmlTextExtractor;
 import javafx.application.Platform;
 import java.util.EnumMap;
@@ -19,6 +20,7 @@ import javafx.geometry.Pos;
 import javafx.scene.Parent;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.Control;
 import javafx.scene.control.ContentDisplay;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
@@ -26,13 +28,17 @@ import javafx.scene.control.ListView;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TextField;
+import javafx.scene.control.ToolBar;
 import javafx.scene.control.Tooltip;
+import javafx.scene.Node;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.scene.web.HTMLEditor;
+import javafx.scene.text.Text;
+import javafx.scene.text.TextFlow;
 import javafx.util.Duration;
 
 public class MainView {
@@ -44,25 +50,62 @@ public class MainView {
             <style id="lightnote-editor-style">
             body {
                 background: #ffffff;
-                color: #1f2937;
+                color: #223046;
                 font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
                 font-size: 15px;
-                line-height: 1.75;
-                margin: 20px 56px 48px 56px;
+                line-height: 1.82;
+                margin: 24px 60px 56px 60px;
             }
-            p { margin: 0 0 12px 0; }
-            h1, h2, h3 { color: #111827; line-height: 1.35; margin: 20px 0 12px 0; }
+            p {
+                margin: 0 0 14px 0;
+            }
+            h1, h2, h3 {
+                color: #152033;
+                line-height: 1.3;
+                font-weight: 700;
+                margin: 28px 0 14px 0;
+            }
+            h1 {
+                font-size: 28px;
+                margin-top: 8px;
+            }
+            h2 {
+                font-size: 22px;
+            }
+            h3 {
+                font-size: 18px;
+            }
+            ul, ol {
+                margin: 0 0 16px 22px;
+                padding: 0;
+            }
+            li {
+                margin: 0 0 8px 0;
+            }
             a { color: #3867d6; }
             blockquote {
                 border-left: 3px solid #5b7cfa;
-                color: #4b5563;
-                margin: 8px 0;
-                padding-left: 12px;
+                color: #4f5f76;
+                margin: 10px 0 16px 0;
+                padding: 2px 0 2px 14px;
             }
             pre, code {
                 background: #f3f6fb;
                 color: #1f2937;
                 border-radius: 4px;
+            }
+            pre {
+                margin: 12px 0 16px 0;
+                padding: 12px 14px;
+                white-space: pre-wrap;
+            }
+            code {
+                padding: 1px 4px;
+            }
+            hr {
+                border: none;
+                border-top: 1px solid #dce4f0;
+                margin: 20px 0;
             }
             ::-webkit-scrollbar { width: 8px; height: 8px; }
             ::-webkit-scrollbar-track { background: transparent; }
@@ -82,9 +125,11 @@ public class MainView {
     private final ObservableList<Note> notes = FXCollections.observableArrayList();
     private final ListView<Note> noteList = new ListView<>(notes);
     private final TextField searchField = new TextField();
+    private final Button clearSearchButton = new Button("清空");
     private final TextField titleField = new TextField();
     private final TextField categoryField = new TextField();
     private final HTMLEditor contentEditor = new HTMLEditor();
+    private final Button syncButton = new Button("同步");
     private final CheckBox pinnedBox = new CheckBox("置顶");
     private final CheckBox favoriteBox = new CheckBox("收藏");
     private final CheckBox archivedBox = new CheckBox("归档");
@@ -95,8 +140,12 @@ public class MainView {
     private final Label updateTimeLabel = new Label("");
     private final Label wordCountLabel = new Label("0 字");
     private final Map<NoteFilter, Label> navigationCountLabels = new EnumMap<>(NoteFilter.class);
+    private final Map<NoteFilter, Button> navigationButtons = new EnumMap<>(NoteFilter.class);
+    private final Label emptyStateTitleLabel = new Label();
+    private final Label emptyStateDescriptionLabel = new Label();
     private final PauseTransition autosaveDelay = new PauseTransition(Duration.millis(700));
     private final PauseTransition autoSyncDelay = new PauseTransition(Duration.millis(2500));
+    private final PauseTransition manualSyncFeedbackDelay = new PauseTransition(Duration.millis(1400));
     private final SplitPane contentSplitPane = new SplitPane();
 
     private Note selectedNote;
@@ -120,7 +169,9 @@ public class MainView {
         this.configRepository = configRepository;
         this.syncService = syncService;
         this.onLogout = onLogout;
+        manualSyncFeedbackDelay.setOnFinished(event -> resetSyncButton());
         buildLayout();
+        setCurrentFilter(currentFilter);
         bindEvents();
         refreshNotes();
     }
@@ -200,13 +251,21 @@ public class MainView {
     private Parent buildQuickActions() {
         searchField.setPromptText("搜索标题、正文或摘要");
         searchField.getStyleClass().add("search-field");
+        clearSearchButton.getStyleClass().add("search-clear-button");
+        clearSearchButton.setManaged(false);
+        clearSearchButton.setVisible(false);
+        clearSearchButton.setOnAction(event -> searchField.clear());
+
+        HBox searchRow = new HBox(8, searchField, clearSearchButton);
+        HBox.setHgrow(searchField, Priority.ALWAYS);
+        searchRow.setAlignment(Pos.CENTER_LEFT);
 
         Button newButton = new Button("+ 新建");
         newButton.getStyleClass().add("primary-button");
         newButton.setMaxWidth(Double.MAX_VALUE);
         newButton.setOnAction(event -> createNote());
 
-        VBox quickActions = new VBox(10, searchField, newButton);
+        VBox quickActions = new VBox(10, searchRow, newButton);
         quickActions.getStyleClass().add("quick-actions");
         return quickActions;
     }
@@ -232,9 +291,10 @@ public class MainView {
         button.setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
         button.setGraphic(buildNavButtonGraphic(text, showCountBadge ? createNavigationCountLabel(filter) : null));
         button.setOnAction(event -> {
-            currentFilter = filter;
+            setCurrentFilter(filter);
             refreshNotes();
         });
+        navigationButtons.put(filter, button);
         return button;
     }
 
@@ -261,6 +321,7 @@ public class MainView {
     private Parent buildNoteList() {
         noteList.setCellFactory(list -> new NoteCardCell());
         noteList.getStyleClass().add("note-list");
+        noteList.setPlaceholder(buildEmptyState());
         return noteList;
     }
 
@@ -273,13 +334,17 @@ public class MainView {
 
         contentEditor.getStyleClass().add("rich-editor");
         contentEditor.setPrefHeight(620);
+        contentEditor.sceneProperty().addListener((obs, oldScene, newScene) -> {
+            if (newScene != null) {
+                Platform.runLater(this::configureEditorToolbar);
+            }
+        });
         VBox.setVgrow(contentEditor, Priority.ALWAYS);
 
         Button saveButton = new Button("保存");
         saveButton.getStyleClass().add("ghost-button");
         saveButton.setOnAction(event -> saveSelectedNote());
 
-        Button syncButton = new Button("同步");
         syncButton.getStyleClass().add("ghost-button");
         syncButton.setOnAction(event -> syncNow(syncButton));
 
@@ -325,7 +390,11 @@ public class MainView {
                 selectNote(newValue);
             }
         });
-        searchField.textProperty().addListener((obs, oldValue, newValue) -> refreshNotes());
+        searchField.textProperty().addListener((obs, oldValue, newValue) -> {
+            updateSearchClearButton();
+            updateEmptyStateText();
+            refreshNotes();
+        });
 
         autosaveDelay.setOnFinished(event -> saveSelectedNote());
         autoSyncDelay.setOnFinished(event -> autoSyncNow());
@@ -338,13 +407,218 @@ public class MainView {
         archivedBox.selectedProperty().addListener((obs, oldValue, newValue) -> scheduleAutosave());
     }
 
+    private Parent buildEmptyState() {
+        emptyStateTitleLabel.getStyleClass().add("empty-state-title");
+        emptyStateDescriptionLabel.getStyleClass().add("empty-state-description");
+        emptyStateDescriptionLabel.setWrapText(true);
+        updateEmptyStateText();
+        VBox box = new VBox(6, emptyStateTitleLabel, emptyStateDescriptionLabel);
+        box.getStyleClass().add("empty-state");
+        box.setPadding(new Insets(36, 18, 24, 18));
+        box.setAlignment(Pos.CENTER);
+        return box;
+    }
+
+    private void updateSearchClearButton() {
+        boolean active = isSearchActive();
+        clearSearchButton.setManaged(active);
+        clearSearchButton.setVisible(active);
+    }
+
+    private boolean isSearchActive() {
+        return searchField.getText() != null && !searchField.getText().isBlank();
+    }
+
+    private void updateEmptyStateText() {
+        if (isSearchActive()) {
+            emptyStateTitleLabel.setText("没有匹配结果");
+            emptyStateDescriptionLabel.setText("换个关键词试试，或点击清空回到当前筛选列表。");
+            return;
+        }
+        emptyStateTitleLabel.setText(emptyStateTitle());
+        emptyStateDescriptionLabel.setText(emptyStateDescription());
+    }
+
+    private String emptyStateTitle() {
+        return switch (currentFilter) {
+            case TODAY -> "今天还没有笔记";
+            case RECENT_7_DAYS -> "最近 7 天还没有笔记";
+            case FAVORITES -> "还没有收藏笔记";
+            case ARCHIVED -> "还没有归档笔记";
+            case CONFLICT_COPIES -> "目前没有冲突副本";
+            case ALL -> "还没有笔记";
+        };
+    }
+
+    private String emptyStateDescription() {
+        return switch (currentFilter) {
+            case TODAY, RECENT_7_DAYS, ALL -> "点击上方“新建”，从第一条笔记开始。";
+            case FAVORITES -> "把重要内容标记为收藏，它们会集中出现在这里。";
+            case ARCHIVED -> "归档后的笔记会收纳在这里，方便后续回看。";
+            case CONFLICT_COPIES -> "发生同步冲突时，保留下来的冲突副本会显示在这里。";
+        };
+    }
+
+    private void setCurrentFilter(NoteFilter filter) {
+        currentFilter = filter == null ? NoteFilter.ALL : filter;
+        updateNavigationSelection();
+        updateEmptyStateText();
+        updateBreadcrumb();
+    }
+
+    private void updateNavigationSelection() {
+        navigationButtons.forEach((filter, button) -> {
+            boolean active = filter == currentFilter;
+            if (active) {
+                if (!button.getStyleClass().contains("nav-button-active")) {
+                    button.getStyleClass().add("nav-button-active");
+                }
+            } else {
+                button.getStyleClass().remove("nav-button-active");
+            }
+        });
+    }
+
+    private void updateBreadcrumb() {
+        if (selectedNote == null) {
+            breadcrumbLabel.setText(filterLabel(currentFilter));
+            return;
+        }
+        breadcrumbLabel.setText(filterLabel(currentFilter) + " / " + nullToEmpty(selectedNote.getTitle()));
+    }
+
+    private String filterLabel(NoteFilter filter) {
+        return switch (filter == null ? NoteFilter.ALL : filter) {
+            case ALL -> "全部笔记";
+            case TODAY -> "今天";
+            case RECENT_7_DAYS -> "最近 7 天";
+            case FAVORITES -> "收藏";
+            case ARCHIVED -> "归档";
+            case CONFLICT_COPIES -> "冲突";
+        };
+    }
+
+    private void configureEditorToolbar() {
+        for (Node toolbarNode : contentEditor.lookupAll(".tool-bar")) {
+            if (!(toolbarNode instanceof ToolBar toolBar)) {
+                continue;
+            }
+            toolBar.getItems().forEach(this::customizeEditorToolbarNode);
+            normalizeToolbarSeparators(toolBar);
+        }
+    }
+
+    private void customizeEditorToolbarNode(Node node) {
+        if (hasAnyStyleClass(node,
+                "html-editor-cut",
+                "html-editor-copy",
+                "html-editor-paste",
+                "html-editor-indent",
+                "html-editor-outdent",
+                "html-editor-hr")) {
+            hideEditorToolbarNode(node);
+            return;
+        }
+        if (hasAnyStyleClass(node, "font-menu-button")) {
+            node.getStyleClass().add("editor-font-family");
+            applyEditorTooltip(node, "字体");
+            return;
+        }
+        if (hasAnyStyleClass(node, "font-size-menu-button")) {
+            node.getStyleClass().add("editor-font-size");
+            applyEditorTooltip(node, "字号");
+            return;
+        }
+        if (hasAnyStyleClass(node, "html-editor-bold")) {
+            applyEditorTooltip(node, "加粗");
+        } else if (hasAnyStyleClass(node, "html-editor-italic")) {
+            applyEditorTooltip(node, "斜体");
+        } else if (hasAnyStyleClass(node, "html-editor-underline")) {
+            applyEditorTooltip(node, "下划线");
+        } else if (hasAnyStyleClass(node, "html-editor-strike")) {
+            applyEditorTooltip(node, "删除线");
+        } else if (hasAnyStyleClass(node, "html-editor-foreground")) {
+            applyEditorTooltip(node, "文字颜色");
+        } else if (hasAnyStyleClass(node, "html-editor-background")) {
+            applyEditorTooltip(node, "高亮");
+        } else if (hasAnyStyleClass(node, "html-editor-bullets")) {
+            applyEditorTooltip(node, "无序列表");
+        } else if (hasAnyStyleClass(node, "html-editor-numbers")) {
+            applyEditorTooltip(node, "有序列表");
+        } else if (hasAnyStyleClass(node, "html-editor-align-left")) {
+            applyEditorTooltip(node, "左对齐");
+        } else if (hasAnyStyleClass(node, "html-editor-align-center")) {
+            applyEditorTooltip(node, "居中");
+        } else if (hasAnyStyleClass(node, "html-editor-align-right")) {
+            applyEditorTooltip(node, "右对齐");
+        } else if (hasAnyStyleClass(node, "html-editor-align-justify")) {
+            applyEditorTooltip(node, "两端对齐");
+        }
+    }
+
+    private void normalizeToolbarSeparators(ToolBar toolBar) {
+        boolean previousVisible = false;
+        for (Node item : toolBar.getItems()) {
+            if (!(item instanceof Separator)) {
+                previousVisible = item.isManaged();
+                continue;
+            }
+            boolean nextVisible = hasVisibleToolbarItemAfter(toolBar, item);
+            boolean shouldShow = previousVisible && nextVisible;
+            item.setManaged(shouldShow);
+            item.setVisible(shouldShow);
+            previousVisible = shouldShow;
+        }
+    }
+
+    private boolean hasVisibleToolbarItemAfter(ToolBar toolBar, Node current) {
+        boolean seenCurrent = false;
+        for (Node item : toolBar.getItems()) {
+            if (!seenCurrent) {
+                if (item == current) {
+                    seenCurrent = true;
+                }
+                continue;
+            }
+            if (!(item instanceof Separator) && item.isManaged()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void hideEditorToolbarNode(Node node) {
+        node.setManaged(false);
+        node.setVisible(false);
+    }
+
+    private void applyEditorTooltip(Node node, String text) {
+        if (node instanceof Control control) {
+            control.setTooltip(new Tooltip(text));
+        }
+    }
+
+    private boolean hasAnyStyleClass(Node node, String... styleClasses) {
+        for (String styleClass : styleClasses) {
+            if (node.getStyleClass().contains(styleClass)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void refreshNotes() {
         try {
             Note selected = selectedNote;
             List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter);
             refreshNavigationCounts();
             clearLocalFailure();
-            notes.setAll(loaded);
+            suppressSelectionChange = true;
+            try {
+                notes.setAll(loaded);
+            } finally {
+                suppressSelectionChange = false;
+            }
             if (selected != null) {
                 notes.stream()
                         .filter(note -> note.getNoteUuid().equals(selected.getNoteUuid()))
@@ -352,6 +626,14 @@ public class MainView {
                         .ifPresentOrElse(
                                 note -> noteList.getSelectionModel().select(note),
                                 () -> {
+                                    if (shouldPreserveEditorDuringSearch(selected, loaded)) {
+                                        selectedNote = selected;
+                                        noteList.getSelectionModel().clearSelection();
+                                        noteList.refresh();
+                                        updateBreadcrumb();
+                                        updateSyncLamp(selectedNote);
+                                        return;
+                                    }
                                     if (!notes.isEmpty()) {
                                         noteList.getSelectionModel().selectFirst();
                                     } else {
@@ -367,6 +649,12 @@ public class MainView {
         } catch (RuntimeException ex) {
             markLocalFailure(selectedNote, "刷新列表", ex);
         }
+    }
+
+    private boolean shouldPreserveEditorDuringSearch(Note selected, List<Note> loaded) {
+        return selected != null
+                && isSearchActive()
+                && loaded.stream().noneMatch(note -> note.getNoteUuid().equals(selected.getNoteUuid()));
     }
 
     private void refreshNotesPreservingEditor() {
@@ -445,7 +733,7 @@ public class MainView {
             favoriteBox.setSelected(false);
             archivedBox.setSelected(false);
             setEditorDisabled(true);
-            breadcrumbLabel.setText("全部笔记");
+            updateBreadcrumb();
             updateEditorStatus("未选择笔记");
         } else {
             setEditorDisabled(false);
@@ -455,7 +743,7 @@ public class MainView {
             pinnedBox.setSelected(note.isPinned());
             favoriteBox.setSelected(note.isFavorite());
             archivedBox.setSelected(note.isArchived());
-            breadcrumbLabel.setText("全部笔记 / " + nullToEmpty(note.getTitle()));
+            updateBreadcrumb();
             updateEditorStatus("已打开");
         }
         loadingSelection = false;
@@ -474,7 +762,7 @@ public class MainView {
         if (loadingSelection || selectedNote == null) {
             return;
         }
-        breadcrumbLabel.setText("全部笔记 / " + titleField.getText());
+        breadcrumbLabel.setText(filterLabel(currentFilter) + " / " + titleField.getText());
         saveStatusLabel.setText("正在输入...");
         updateSyncLamp(selectedNote);
         updateWordCount();
@@ -492,7 +780,7 @@ public class MainView {
         boolean archivedChanged = selectedNote.isArchived() != archivedBox.isSelected();
         selectedNote.setTitle(titleField.getText());
         selectedNote.setCategoryName(categoryField.getText());
-        selectedNote.setContent(stripEditorStyle(contentEditor.getHtmlText()));
+        selectedNote.setContent(sanitizeEditorHtml(contentEditor.getHtmlText()));
         selectedNote.setPinned(pinnedBox.isSelected());
         selectedNote.setFavorite(favoriteBox.isSelected());
         selectedNote.setArchived(archivedBox.isSelected());
@@ -560,12 +848,13 @@ public class MainView {
         if (syncInProgress) {
             if (manual) {
                 saveStatusLabel.setText("同步正在进行中");
+                showManualSyncFeedback("同步中...", "ghost-button-attention");
             }
             return;
         }
         syncInProgress = true;
         if (syncButton != null) {
-            syncButton.setDisable(true);
+            showManualSyncProgress();
         }
         setSyncLamp("syncing", "同步中");
         if (manual) {
@@ -588,8 +877,14 @@ public class MainView {
                     }
                     if (summary.conflictCount() > 0) {
                         setSyncLamp("unsynced", "冲突");
+                        if (manual) {
+                            showManualSyncFeedback("发现冲突", "ghost-button-attention");
+                        }
                     } else {
                         setSyncLamp("synced", "已同步");
+                        if (manual) {
+                            showManualSyncFeedback("已同步", "ghost-button-success");
+                        }
                     }
                     if (syncButton != null) {
                         syncButton.setDisable(false);
@@ -604,7 +899,7 @@ public class MainView {
                     saveStatusLabel.setText((manual ? "同步失败: " : "自动同步失败: ") + lastSyncError);
                     setSyncLamp("unsynced", "同步失败: " + lastSyncError);
                     if (syncButton != null) {
-                        syncButton.setDisable(false);
+                        showManualSyncFeedback("同步失败", "ghost-button-danger");
                     }
                     scheduleDeferredSyncIfNeeded();
                 });
@@ -745,6 +1040,35 @@ public class MainView {
         };
     }
 
+    private void showManualSyncProgress() {
+        manualSyncFeedbackDelay.stop();
+        syncButton.getStyleClass().removeAll("ghost-button-success", "ghost-button-attention", "ghost-button-danger");
+        syncButton.getStyleClass().add("ghost-button-attention");
+        syncButton.setText("同步中...");
+        syncButton.setDisable(true);
+    }
+
+    private void showManualSyncFeedback(String text, String styleClass) {
+        manualSyncFeedbackDelay.stop();
+        syncButton.getStyleClass().removeAll("ghost-button-success", "ghost-button-attention", "ghost-button-danger");
+        if (styleClass != null && !styleClass.isBlank()) {
+            syncButton.getStyleClass().add(styleClass);
+        }
+        syncButton.setText(text);
+        syncButton.setDisable(false);
+        manualSyncFeedbackDelay.playFromStart();
+    }
+
+    private void resetSyncButton() {
+        if (syncInProgress) {
+            showManualSyncProgress();
+            return;
+        }
+        syncButton.getStyleClass().removeAll("ghost-button-success", "ghost-button-attention", "ghost-button-danger");
+        syncButton.setText("同步");
+        syncButton.setDisable(false);
+    }
+
     private boolean hasLocalFailure(Note note) {
         if (lastLocalFailureMessage == null || lastLocalFailureMessage.isBlank()) {
             return false;
@@ -782,7 +1106,7 @@ public class MainView {
     }
 
     private void updateWordCount() {
-        String plainText = plainText(stripEditorStyle(contentEditor.getHtmlText()));
+        String plainText = plainText(sanitizeEditorHtml(contentEditor.getHtmlText()));
         long count = plainText.chars().filter(ch -> !Character.isWhitespace(ch)).count();
         wordCountLabel.setText(count + " 字");
     }
@@ -808,7 +1132,7 @@ public class MainView {
     }
 
     private String injectEditorStyle(String html) {
-        String withoutOldStyle = stripEditorStyle(html);
+        String withoutOldStyle = sanitizeEditorHtml(html);
         String lowerHtml = withoutOldStyle.toLowerCase();
         int headEnd = lowerHtml.indexOf("</head>");
         if (headEnd >= 0) {
@@ -823,11 +1147,8 @@ public class MainView {
         return editorDocument(withoutOldStyle);
     }
 
-    private String stripEditorStyle(String html) {
-        if (html == null || html.isBlank()) {
-            return "";
-        }
-        return html.replaceAll("(?is)<style\\s+id=[\"']lightnote-editor-style[\"'][^>]*>.*?</style>", "");
+    private String sanitizeEditorHtml(String html) {
+        return HtmlContentSanitizer.sanitizeForStorage(html);
     }
 
     private String plainText(String html) {
@@ -859,7 +1180,7 @@ public class MainView {
                 && note.getTitle().contains(CONFLICT_COPY_MARKER);
     }
 
-    private static class NoteCardCell extends ListCell<Note> {
+    private class NoteCardCell extends ListCell<Note> {
 
         @Override
         protected void updateItem(Note note, boolean empty) {
@@ -870,14 +1191,10 @@ public class MainView {
                 return;
             }
 
-            Label title = new Label(note.getTitle());
-            title.getStyleClass().add("card-title");
+            TextFlow title = highlightText(note.getTitle(), searchField.getText(), "card-title");
             title.setMaxWidth(Double.MAX_VALUE);
-            title.setWrapText(true);
 
-            Label summary = new Label(summaryText(note));
-            summary.getStyleClass().add("card-summary");
-            summary.setWrapText(true);
+            TextFlow summary = highlightText(summaryText(note), searchField.getText(), "card-summary");
             summary.setMaxHeight(42);
             summary.setMaxWidth(Double.MAX_VALUE);
 
@@ -899,14 +1216,14 @@ public class MainView {
             card.setFillWidth(true);
             card.prefWidthProperty().bind(widthProperty().subtract(18));
             card.maxWidthProperty().bind(widthProperty().subtract(18));
-            title.maxWidthProperty().bind(card.widthProperty().subtract(20));
-            summary.maxWidthProperty().bind(card.widthProperty().subtract(20));
+            title.prefWidthProperty().bind(card.widthProperty().subtract(20));
+            summary.prefWidthProperty().bind(card.widthProperty().subtract(20));
             setText(null);
             setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
             setGraphic(card);
         }
 
-        private static String metaText(Note note) {
+        private String metaText(Note note) {
             String category = note.getCategoryName() == null || note.getCategoryName().isBlank()
                     ? "未分类"
                     : note.getCategoryName();
@@ -914,7 +1231,7 @@ public class MainView {
             return marker + category + "  " + note.getUpdateTime();
         }
 
-        private static String syncLampState(Note note) {
+        private String syncLampState(Note note) {
             return switch (note.getSyncStatus()) {
                 case SYNCED -> "synced";
                 case SYNCING -> "syncing";
@@ -922,7 +1239,7 @@ public class MainView {
             };
         }
 
-        private static String syncTooltipText(Note note) {
+        private String syncTooltipText(Note note) {
             if (isConflictCopy(note)) {
                 return "冲突副本，待同步";
             }
@@ -935,7 +1252,7 @@ public class MainView {
             };
         }
 
-        private static String summaryText(Note note) {
+        private String summaryText(Note note) {
             String candidate = sanitizePreview(note.getSummary());
             if (!candidate.isBlank()) {
                 return candidate;
@@ -944,14 +1261,44 @@ public class MainView {
             return candidate.isBlank() ? "无正文" : candidate;
         }
 
-        private static String sanitizePreview(String value) {
+        private String sanitizePreview(String value) {
             return HtmlTextExtractor.toPlainText(value).replaceAll("\\s+", " ").strip();
         }
 
-        private static boolean isConflictCopy(Note note) {
-            return note != null
-                    && note.getTitle() != null
-                    && note.getTitle().contains(CONFLICT_COPY_MARKER);
+        private TextFlow highlightText(String value, String query, String baseStyleClass) {
+            TextFlow flow = new TextFlow();
+            flow.getStyleClass().add(baseStyleClass + "-flow");
+            String safeValue = value == null || value.isBlank() ? "" : value;
+            String safeQuery = query == null ? "" : query.strip();
+            if (safeValue.isBlank() || safeQuery.isBlank()) {
+                flow.getChildren().add(createStyledText(safeValue, baseStyleClass));
+                return flow;
+            }
+
+            String lowerValue = safeValue.toLowerCase(Locale.ROOT);
+            String lowerQuery = safeQuery.toLowerCase(Locale.ROOT);
+            int cursor = 0;
+            while (cursor < safeValue.length()) {
+                int matchIndex = lowerValue.indexOf(lowerQuery, cursor);
+                if (matchIndex < 0) {
+                    flow.getChildren().add(createStyledText(safeValue.substring(cursor), baseStyleClass));
+                    break;
+                }
+                if (matchIndex > cursor) {
+                    flow.getChildren().add(createStyledText(safeValue.substring(cursor, matchIndex), baseStyleClass));
+                }
+                Text hit = createStyledText(safeValue.substring(matchIndex, matchIndex + safeQuery.length()), baseStyleClass);
+                hit.getStyleClass().add("search-hit");
+                flow.getChildren().add(hit);
+                cursor = matchIndex + safeQuery.length();
+            }
+            return flow;
+        }
+
+        private Text createStyledText(String value, String styleClass) {
+            Text text = new Text(value);
+            text.getStyleClass().add(styleClass);
+            return text;
         }
     }
 }

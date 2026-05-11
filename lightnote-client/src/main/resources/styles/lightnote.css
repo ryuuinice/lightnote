@@ -139,8 +139,26 @@
     -fx-padding: 7 10;
 }
 
+.nav-button-label {
+    -fx-text-fill: #41516a;
+}
+
+.nav-count-badge {
+    -fx-background-color: #e3ebf6;
+    -fx-background-radius: 999;
+    -fx-text-fill: #61728a;
+    -fx-font-size: 11px;
+    -fx-font-weight: 700;
+    -fx-alignment: center;
+    -fx-padding: 1 7;
+    -fx-min-width: 24;
+}
+
 .nav-button:hover {
     -fx-background-color: #edf2f8;
+}
+
+.nav-button:hover .nav-button-label {
     -fx-text-fill: #244db5;
 }
 

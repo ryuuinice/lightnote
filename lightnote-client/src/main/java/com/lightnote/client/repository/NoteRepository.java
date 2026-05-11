@@ -52,14 +52,7 @@ public class NoteRepository {
         }
 
         String normalized = query == null ? "" : query.trim();
-        String where = switch (safeFilter) {
-            case TODAY -> "is_deleted = 0 AND is_archived = 0 AND substr(update_time, 1, 10) = date('now', 'localtime')";
-            case RECENT_7_DAYS -> "is_deleted = 0 AND is_archived = 0 AND substr(update_time, 1, 10) >= date('now', '-7 days', 'localtime')";
-            case FAVORITES -> "is_deleted = 0 AND is_archived = 0 AND is_favorite = 1";
-            case ARCHIVED -> "is_deleted = 0 AND is_archived = 1";
-            case CONFLICT_COPIES -> "is_deleted = 0 AND title LIKE '%" + CONFLICT_COPY_MARKER + "%'";
-            case ALL -> "is_deleted = 0 AND is_archived = 0";
-        };
+        String where = whereClauseForFilter(safeFilter);
 
         if (normalized.isEmpty()) {
             return queryNotes("""
@@ -70,6 +63,21 @@ public class NoteRepository {
                     """.formatted(where));
         }
         return searchLikeWithWhere(normalized, where);
+    }
+
+    public long countByFilter(NoteFilter filter) {
+        NoteFilter safeFilter = filter == null ? NoteFilter.ALL : filter;
+        String where = safeFilter == NoteFilter.ALL
+                ? "is_deleted = 0 AND is_archived = 0"
+                : whereClauseForFilter(safeFilter);
+        String sql = "SELECT COUNT(*) FROM notes WHERE " + where;
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            return resultSet.next() ? resultSet.getLong(1) : 0;
+        } catch (SQLException ex) {
+            throw new IllegalStateException("Failed to count notes for filter " + safeFilter, ex);
+        }
     }
 
     public Note createEmpty() {
@@ -251,7 +259,7 @@ public class NoteRepository {
         }
     }
 
-    public void createConflictCopy(Note local) {
+    public Note createConflictCopy(Note local) {
         Note copy = new Note();
         String now = now();
         copy.setNoteUuid(UUID.randomUUID().toString());
@@ -277,9 +285,15 @@ public class NoteRepository {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
+             PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             bindNoteForInsert(statement, copy);
             statement.executeUpdate();
+            try (ResultSet keys = statement.getGeneratedKeys()) {
+                if (keys.next()) {
+                    copy.setId(keys.getLong(1));
+                }
+            }
+            return copy;
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to create conflict copy", ex);
         }
@@ -412,6 +426,17 @@ public class NoteRepository {
 
     private List<Note> searchLike(String query) {
         return searchLikeWithWhere(query, "is_deleted = 0 AND is_archived = 0");
+    }
+
+    private String whereClauseForFilter(NoteFilter filter) {
+        return switch (filter) {
+            case TODAY -> "is_deleted = 0 AND is_archived = 0 AND substr(update_time, 1, 10) = date('now', 'localtime')";
+            case RECENT_7_DAYS -> "is_deleted = 0 AND is_archived = 0 AND substr(update_time, 1, 10) >= date('now', '-7 days', 'localtime')";
+            case FAVORITES -> "is_deleted = 0 AND is_archived = 0 AND is_favorite = 1";
+            case ARCHIVED -> "is_deleted = 0 AND is_archived = 1";
+            case CONFLICT_COPIES -> "is_deleted = 0 AND title LIKE '%" + CONFLICT_COPY_MARKER + "%'";
+            case ALL -> "is_deleted = 0 AND is_archived = 0";
+        };
     }
 
     private List<Note> searchLikeWithWhere(String query, String where) {

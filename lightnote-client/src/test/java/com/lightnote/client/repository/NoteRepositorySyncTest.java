@@ -215,4 +215,27 @@ class NoteRepositorySyncTest {
         assertEquals(1, conflicts.size());
         assertEquals(true, conflicts.get(0).getTitle().contains("冲突副本"));
     }
+
+    @Test
+    void countByFilterReturnsFavoriteArchivedAndConflictTotals() {
+        Note favorite = repository.createEmpty();
+        favorite.setTitle("Favorite");
+        favorite.setFavorite(true);
+        repository.save(favorite);
+
+        Note archived = repository.createEmpty();
+        archived.setTitle("Archived");
+        archived.setArchived(true);
+        repository.save(archived);
+
+        Note source = repository.createEmpty();
+        source.setTitle("Source");
+        source.setContent("<p>local conflict</p>");
+        repository.save(source);
+        repository.createConflictCopy(repository.findByUuid(source.getNoteUuid()));
+
+        assertEquals(1L, repository.countByFilter(NoteFilter.FAVORITES));
+        assertEquals(1L, repository.countByFilter(NoteFilter.ARCHIVED));
+        assertEquals(1L, repository.countByFilter(NoteFilter.CONFLICT_COPIES));
+    }
 }

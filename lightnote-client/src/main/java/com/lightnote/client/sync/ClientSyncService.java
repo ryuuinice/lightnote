@@ -11,19 +11,30 @@ import com.lightnote.client.repository.NoteRepository;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 public class ClientSyncService {
 
     private final NoteRepository noteRepository;
     private final AppConfigRepository configRepository;
+    private final Function<String, LightNoteApiClient> apiClientFactory;
 
     public ClientSyncService(NoteRepository noteRepository, AppConfigRepository configRepository) {
+        this(noteRepository, configRepository, LightNoteApiClient::new);
+    }
+
+    ClientSyncService(
+            NoteRepository noteRepository,
+            AppConfigRepository configRepository,
+            Function<String, LightNoteApiClient> apiClientFactory
+    ) {
         this.noteRepository = noteRepository;
         this.configRepository = configRepository;
+        this.apiClientFactory = apiClientFactory;
     }
 
     public LoginResponse login(String serverUrl, String username, String password) {
-        LightNoteApiClient apiClient = new LightNoteApiClient(serverUrl);
+        LightNoteApiClient apiClient = apiClientFactory.apply(serverUrl);
         LoginResponse response = apiClient.login(username, password);
         configRepository.saveLogin(serverUrl, response.token());
         return response;
@@ -33,18 +44,20 @@ public class ClientSyncService {
         String serverUrl = configRepository.serverUrl();
         String token = configRepository.token()
                 .orElseThrow(() -> new IllegalStateException("请先登录"));
-        LightNoteApiClient apiClient = new LightNoteApiClient(serverUrl);
+        LightNoteApiClient apiClient = apiClientFactory.apply(serverUrl);
 
         long lastSyncVersion = configRepository.lastSyncVersion();
         List<Note> pending = noteRepository.listPendingSync();
         Map<String, String> pendingUpdateTimes = new HashMap<>();
+        Map<String, String> conflictCopyUuids = new HashMap<>();
         pending.forEach(note -> pendingUpdateTimes.put(note.getNoteUuid(), note.getUpdateTime()));
         SyncPushResponse pushResponse = apiClient.push(token, lastSyncVersion, pending);
         pushResponse.successItems().forEach(item -> noteRepository.markSynced(item, pendingUpdateTimes.get(item.noteUuid())));
         for (SyncConflictItem conflict : pushResponse.conflictItems()) {
             Note local = noteRepository.findByUuid(conflict.noteUuid());
             if (local != null) {
-                noteRepository.createConflictCopy(local);
+                Note conflictCopy = noteRepository.createConflictCopy(local);
+                conflictCopyUuids.put(conflict.noteUuid(), conflictCopy.getNoteUuid());
             }
             noteRepository.resolveConflict(conflict);
         }
@@ -62,7 +75,14 @@ public class ClientSyncService {
 
         long finalVersion = Math.max(pushResponse.serverVersion(), nextSince);
         configRepository.saveLastSyncVersion(finalVersion);
-        return new SyncSummary(pending.size(), pushResponse.successItems().size(), pushResponse.conflictItems().size(), pulled, finalVersion);
+        return new SyncSummary(
+                pending.size(),
+                pushResponse.successItems().size(),
+                pushResponse.conflictItems().size(),
+                pulled,
+                finalVersion,
+                Map.copyOf(conflictCopyUuids)
+        );
     }
 
     public record SyncSummary(
@@ -70,7 +90,8 @@ public class ClientSyncService {
             int pushedCount,
             int conflictCount,
             int pulledCount,
-            long serverVersion
+            long serverVersion,
+            Map<String, String> conflictCopyUuids
     ) {
     }
 }

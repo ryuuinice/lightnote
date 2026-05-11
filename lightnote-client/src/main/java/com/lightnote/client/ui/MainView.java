@@ -7,8 +7,10 @@ import com.lightnote.client.repository.NoteRepository;
 import com.lightnote.client.sync.ClientSyncService;
 import com.lightnote.client.util.HtmlTextExtractor;
 import javafx.application.Platform;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import javafx.animation.PauseTransition;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
@@ -92,6 +94,7 @@ public class MainView {
     private final Tooltip syncStatusTooltip = new Tooltip("未同步");
     private final Label updateTimeLabel = new Label("");
     private final Label wordCountLabel = new Label("0 字");
+    private final Map<NoteFilter, Label> navigationCountLabels = new EnumMap<>(NoteFilter.class);
     private final PauseTransition autosaveDelay = new PauseTransition(Duration.millis(700));
     private final PauseTransition autoSyncDelay = new PauseTransition(Duration.millis(2500));
     private final SplitPane contentSplitPane = new SplitPane();
@@ -103,6 +106,8 @@ public class MainView {
     private boolean syncRequestedDuringRun;
     private boolean syncFailureActive;
     private String lastSyncError;
+    private String localFailureNoteUuid;
+    private String lastLocalFailureMessage;
     private NoteFilter currentFilter = NoteFilter.ALL;
 
     public MainView(
@@ -151,9 +156,9 @@ public class MainView {
         Button allNotes = navButton("全部笔记", NoteFilter.ALL);
         Button today = navButton("今天", NoteFilter.TODAY);
         Button week = navButton("最近 7 天", NoteFilter.RECENT_7_DAYS);
-        Button favorites = navButton("收藏", NoteFilter.FAVORITES);
-        Button conflicts = navButton("冲突", NoteFilter.CONFLICT_COPIES);
-        Button archive = navButton("归档", NoteFilter.ARCHIVED);
+        Button favorites = navButton("收藏", NoteFilter.FAVORITES, true);
+        Button conflicts = navButton("冲突", NoteFilter.CONFLICT_COPIES, true);
+        Button archive = navButton("归档", NoteFilter.ARCHIVED, true);
 
         Label categoryTitle = new Label("分类");
         categoryTitle.getStyleClass().add("section-label");
@@ -217,14 +222,40 @@ public class MainView {
     }
 
     private Button navButton(String text, NoteFilter filter) {
-        Button button = new Button(text);
+        return navButton(text, filter, false);
+    }
+
+    private Button navButton(String text, NoteFilter filter, boolean showCountBadge) {
+        Button button = new Button();
         button.setMaxWidth(Double.MAX_VALUE);
         button.getStyleClass().add("nav-button");
+        button.setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
+        button.setGraphic(buildNavButtonGraphic(text, showCountBadge ? createNavigationCountLabel(filter) : null));
         button.setOnAction(event -> {
             currentFilter = filter;
             refreshNotes();
         });
         return button;
+    }
+
+    private Parent buildNavButtonGraphic(String text, Label countLabel) {
+        Label titleLabel = new Label(text);
+        titleLabel.getStyleClass().add("nav-button-label");
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+        HBox row = countLabel == null
+                ? new HBox(8, titleLabel, spacer)
+                : new HBox(8, titleLabel, spacer, countLabel);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.setMaxWidth(Double.MAX_VALUE);
+        return row;
+    }
+
+    private Label createNavigationCountLabel(NoteFilter filter) {
+        Label label = new Label("0");
+        label.getStyleClass().add("nav-count-badge");
+        navigationCountLabels.put(filter, label);
+        return label;
     }
 
     private Parent buildNoteList() {
@@ -308,27 +339,33 @@ public class MainView {
     }
 
     private void refreshNotes() {
-        Note selected = selectedNote;
-        List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter);
-        notes.setAll(loaded);
-        if (selected != null) {
-            notes.stream()
-                    .filter(note -> note.getNoteUuid().equals(selected.getNoteUuid()))
-                    .findFirst()
-                    .ifPresentOrElse(
-                            note -> noteList.getSelectionModel().select(note),
-                            () -> {
-                                if (!notes.isEmpty()) {
-                                    noteList.getSelectionModel().selectFirst();
-                                } else {
-                                    selectNote(null);
+        try {
+            Note selected = selectedNote;
+            List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter);
+            refreshNavigationCounts();
+            clearLocalFailure();
+            notes.setAll(loaded);
+            if (selected != null) {
+                notes.stream()
+                        .filter(note -> note.getNoteUuid().equals(selected.getNoteUuid()))
+                        .findFirst()
+                        .ifPresentOrElse(
+                                note -> noteList.getSelectionModel().select(note),
+                                () -> {
+                                    if (!notes.isEmpty()) {
+                                        noteList.getSelectionModel().selectFirst();
+                                    } else {
+                                        selectNote(null);
+                                    }
                                 }
-                            }
-                    );
-        } else if (!notes.isEmpty()) {
-            noteList.getSelectionModel().selectFirst();
-        } else {
-            selectNote(null);
+                        );
+            } else if (!notes.isEmpty()) {
+                noteList.getSelectionModel().selectFirst();
+            } else {
+                selectNote(null);
+            }
+        } catch (RuntimeException ex) {
+            markLocalFailure(selectedNote, "刷新列表", ex);
         }
     }
 
@@ -338,52 +375,66 @@ public class MainView {
             return;
         }
         Note editingNote = selectedNote;
-        String selectedUuid = selectedNote.getNoteUuid();
-        List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter);
-        suppressSelectionChange = true;
         try {
-            notes.setAll(loaded);
-        } finally {
-            suppressSelectionChange = false;
-        }
-        selectedNote = editingNote;
-        Note refreshedNote = loaded.stream()
-                .filter(note -> note.getNoteUuid().equals(selectedUuid))
-                .findFirst()
-                .orElse(null);
-        if (refreshedNote == null) {
+            String selectedUuid = selectedNote.getNoteUuid();
+            List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter);
+            refreshNavigationCounts();
+            clearLocalFailure();
+            suppressSelectionChange = true;
+            try {
+                notes.setAll(loaded);
+            } finally {
+                suppressSelectionChange = false;
+            }
+            selectedNote = editingNote;
+            Note refreshedNote = loaded.stream()
+                    .filter(note -> note.getNoteUuid().equals(selectedUuid))
+                    .findFirst()
+                    .orElse(null);
+            if (refreshedNote == null) {
+                noteList.refresh();
+                updateSyncLamp(selectedNote);
+                return;
+            }
+            selectedNote.setSyncStatus(refreshedNote.getSyncStatus());
+            selectedNote.setServerVersion(refreshedNote.getServerVersion());
+            selectedNote.setUpdateTime(refreshedNote.getUpdateTime());
+            updateTimeLabel.setText("更新 " + selectedNote.getUpdateTime());
+            suppressSelectionChange = true;
+            try {
+                noteList.getSelectionModel().select(refreshedNote);
+            } finally {
+                suppressSelectionChange = false;
+            }
             noteList.refresh();
             updateSyncLamp(selectedNote);
-            return;
+        } catch (RuntimeException ex) {
+            markLocalFailure(editingNote, "刷新列表", ex);
         }
-        selectedNote.setSyncStatus(refreshedNote.getSyncStatus());
-        selectedNote.setServerVersion(refreshedNote.getServerVersion());
-        selectedNote.setUpdateTime(refreshedNote.getUpdateTime());
-        updateTimeLabel.setText("更新 " + selectedNote.getUpdateTime());
-        suppressSelectionChange = true;
-        try {
-            noteList.getSelectionModel().select(refreshedNote);
-        } finally {
-            suppressSelectionChange = false;
-        }
-        noteList.refresh();
-        updateSyncLamp(selectedNote);
     }
 
     private void createNote() {
-        Note note = noteRepository.createEmpty();
-        searchField.clear();
-        refreshNotes();
-        noteList.getSelectionModel().select(notes.stream()
-                .filter(item -> item.getNoteUuid().equals(note.getNoteUuid()))
-                .findFirst()
-                .orElse(note));
-        titleField.requestFocus();
-        titleField.selectAll();
+        try {
+            Note note = noteRepository.createEmpty();
+            searchField.clear();
+            refreshNotes();
+            clearLocalFailure();
+            noteList.getSelectionModel().select(notes.stream()
+                    .filter(item -> item.getNoteUuid().equals(note.getNoteUuid()))
+                    .findFirst()
+                    .orElse(note));
+            titleField.requestFocus();
+            titleField.selectAll();
+        } catch (RuntimeException ex) {
+            markLocalFailure(selectedNote, "新建笔记", ex);
+        }
     }
 
     private void selectNote(Note note) {
         autosaveDelay.stop();
+        if (selectedNote == null || note == null || !selectedNote.getNoteUuid().equals(note.getNoteUuid())) {
+            clearLocalFailure();
+        }
         selectedNote = note;
         loadingSelection = true;
         if (note == null) {
@@ -425,18 +476,18 @@ public class MainView {
         }
         breadcrumbLabel.setText("全部笔记 / " + titleField.getText());
         saveStatusLabel.setText("正在输入...");
-        setSyncLamp("unsynced");
+        updateSyncLamp(selectedNote);
         updateWordCount();
         autosaveDelay.playFromStart();
     }
 
-    private void saveSelectedNote() {
-        saveSelectedNote(true);
+    private boolean saveSelectedNote() {
+        return saveSelectedNote(true);
     }
 
-    private void saveSelectedNote(boolean scheduleSync) {
+    private boolean saveSelectedNote(boolean scheduleSync) {
         if (selectedNote == null || loadingSelection) {
-            return;
+            return true;
         }
         boolean archivedChanged = selectedNote.isArchived() != archivedBox.isSelected();
         selectedNote.setTitle(titleField.getText());
@@ -445,8 +496,15 @@ public class MainView {
         selectedNote.setPinned(pinnedBox.isSelected());
         selectedNote.setFavorite(favoriteBox.isSelected());
         selectedNote.setArchived(archivedBox.isSelected());
-        noteRepository.save(selectedNote);
+        try {
+            noteRepository.save(selectedNote);
+        } catch (RuntimeException ex) {
+            markLocalFailure(selectedNote, "本地保存", ex);
+            return false;
+        }
+        clearLocalFailure();
         updateEditorStatus(scheduleSync ? "已保存到本地，等待同步" : "已保存到本地");
+        refreshNavigationCounts();
         if (scheduleSync) {
             scheduleAutoSync();
         }
@@ -455,21 +513,29 @@ public class MainView {
         } else {
             noteList.refresh();
         }
+        return true;
     }
 
     private void deleteSelectedNote() {
         if (selectedNote == null) {
             return;
         }
-        Note noteToDelete = selectedNote;
-        noteRepository.softDelete(noteToDelete);
-        selectedNote = null;
-        refreshNotes();
+        try {
+            Note noteToDelete = selectedNote;
+            noteRepository.softDelete(noteToDelete);
+            clearLocalFailure();
+            selectedNote = null;
+            refreshNotes();
+        } catch (RuntimeException ex) {
+            markLocalFailure(selectedNote, "删除笔记", ex);
+        }
     }
 
     private void syncNow(Button syncButton) {
         autoSyncDelay.stop();
-        saveSelectedNote(false);
+        if (!saveSelectedNote(false)) {
+            return;
+        }
         runSync(syncButton, true);
     }
 
@@ -512,7 +578,7 @@ public class MainView {
                     syncInProgress = false;
                     syncFailureActive = false;
                     lastSyncError = null;
-                    refreshNotesPreservingEditor();
+                    refreshNotesAfterSync(summary);
                     if (manual) {
                         saveStatusLabel.setText("同步完成: 上传 " + summary.pushedCount()
                                 + " / 冲突 " + summary.conflictCount()
@@ -534,9 +600,9 @@ public class MainView {
                 Platform.runLater(() -> {
                     syncInProgress = false;
                     syncFailureActive = true;
-                    lastSyncError = ex.getMessage();
-                    saveStatusLabel.setText((manual ? "同步失败: " : "自动同步失败: ") + ex.getMessage());
-                    setSyncLamp("unsynced", "未同步: " + ex.getMessage());
+                    lastSyncError = normalizeErrorMessage(ex, "同步失败");
+                    saveStatusLabel.setText((manual ? "同步失败: " : "自动同步失败: ") + lastSyncError);
+                    setSyncLamp("unsynced", "同步失败: " + lastSyncError);
                     if (syncButton != null) {
                         syncButton.setDisable(false);
                     }
@@ -556,8 +622,70 @@ public class MainView {
         scheduleAutoSync();
     }
 
+    private void refreshNotesAfterSync(ClientSyncService.SyncSummary summary) {
+        if (selectedNote != null) {
+            String conflictCopyUuid = summary.conflictCopyUuids().get(selectedNote.getNoteUuid());
+            if (conflictCopyUuid != null) {
+                refreshNotesAndSelect(conflictCopyUuid);
+                saveStatusLabel.setText("检测到同步冲突，已切换到冲突副本继续编辑");
+                return;
+            }
+        }
+        refreshNotesPreservingEditor();
+    }
+
+    private void refreshNotesAndSelect(String noteUuid) {
+        try {
+            List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter);
+            refreshNavigationCounts();
+            clearLocalFailure();
+            notes.setAll(loaded);
+            if (noteUuid == null || noteUuid.isBlank()) {
+                if (!notes.isEmpty()) {
+                    noteList.getSelectionModel().selectFirst();
+                } else {
+                    selectNote(null);
+                }
+                return;
+            }
+            Note target = loaded.stream()
+                    .filter(note -> note.getNoteUuid().equals(noteUuid))
+                    .findFirst()
+                    .orElse(null);
+            if (target != null) {
+                noteList.getSelectionModel().select(target);
+                return;
+            }
+            if (!notes.isEmpty()) {
+                noteList.getSelectionModel().selectFirst();
+            } else {
+                selectNote(null);
+            }
+        } catch (RuntimeException ex) {
+            markLocalFailure(selectedNote, "刷新列表", ex);
+        }
+    }
+
     private String nullToEmpty(String value) {
         return value == null ? "" : value;
+    }
+
+    private void refreshNavigationCounts() {
+        updateNavigationCount(NoteFilter.FAVORITES);
+        updateNavigationCount(NoteFilter.CONFLICT_COPIES);
+        updateNavigationCount(NoteFilter.ARCHIVED);
+    }
+
+    private void updateNavigationCount(NoteFilter filter) {
+        Label countLabel = navigationCountLabels.get(filter);
+        if (countLabel == null) {
+            return;
+        }
+        try {
+            countLabel.setText(Long.toString(noteRepository.countByFilter(filter)));
+        } catch (RuntimeException ex) {
+            markLocalFailure(selectedNote, "刷新统计", ex);
+        }
     }
 
     private void updateEditorStatus(String message) {
@@ -575,12 +703,16 @@ public class MainView {
     }
 
     private void updateSyncLamp(Note note) {
+        if (hasLocalFailure(note)) {
+            setSyncLamp("unsynced", lastLocalFailureMessage);
+            return;
+        }
         if (syncInProgress) {
             setSyncLamp("syncing", "同步中");
             return;
         }
         if (syncFailureActive) {
-            setSyncLamp("unsynced", lastSyncError == null || lastSyncError.isBlank() ? "未同步" : "未同步: " + lastSyncError);
+            setSyncLamp("unsynced", lastSyncError == null || lastSyncError.isBlank() ? "同步失败" : "同步失败: " + lastSyncError);
             return;
         }
         switch (note.getSyncStatus()) {
@@ -609,8 +741,44 @@ public class MainView {
             case "syncing" -> "同步中";
             default -> lastSyncError == null || lastSyncError.isBlank()
                     ? "未同步"
-                    : "未同步: " + lastSyncError;
+                    : "同步失败: " + lastSyncError;
         };
+    }
+
+    private boolean hasLocalFailure(Note note) {
+        if (lastLocalFailureMessage == null || lastLocalFailureMessage.isBlank()) {
+            return false;
+        }
+        return localFailureNoteUuid == null
+                || note == null
+                || localFailureNoteUuid.equals(note.getNoteUuid());
+    }
+
+    private void markLocalFailure(Note note, String action, RuntimeException ex) {
+        localFailureNoteUuid = note == null ? null : note.getNoteUuid();
+        lastLocalFailureMessage = action + "失败: " + normalizeErrorMessage(ex, action + "失败");
+        saveStatusLabel.setText(lastLocalFailureMessage);
+        setSyncLamp("unsynced", lastLocalFailureMessage);
+    }
+
+    private void clearLocalFailure() {
+        localFailureNoteUuid = null;
+        lastLocalFailureMessage = null;
+    }
+
+    private String normalizeErrorMessage(Exception ex, String fallback) {
+        if (ex == null) {
+            return fallback;
+        }
+        String message = ex.getMessage();
+        if (message != null && !message.isBlank()) {
+            return message;
+        }
+        Throwable cause = ex.getCause();
+        if (cause != null && cause.getMessage() != null && !cause.getMessage().isBlank()) {
+            return cause.getMessage();
+        }
+        return fallback;
     }
 
     private void updateWordCount() {

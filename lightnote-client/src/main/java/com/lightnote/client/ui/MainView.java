@@ -837,7 +837,7 @@ public class MainView {
             titleField.setText(nullToEmpty(note.getTitle()));
             applyCategoryEditorValue(note.getCategoryName());
             contentEditor.setText(editorTextForNote(note));
-            contentEditor.setEditable(note.getContentFormat() == ContentFormat.MARKDOWN);
+            contentEditor.setEditable(true);
             refreshMarkdownPreview();
             pinnedBox.setSelected(note.isPinned());
             favoriteBox.setSelected(note.isFavorite());
@@ -883,14 +883,25 @@ public class MainView {
         boolean titleChanged = !nullToEmpty(selectedNote.getTitle()).equals(nullToEmpty(titleField.getText()));
         boolean categoryChanged = !nullToEmpty(normalizeCategoryName(selectedNote.getCategoryName()))
                 .equals(nullToEmpty(normalizeCategoryName(categoryBox.getEditor().getText())));
+        String originalContent = selectedNote.getContent();
+        String displayedContent = editorTextForNote(selectedNote);
         String editorContent = editorContentForSave(selectedNote);
-        boolean contentChanged = !nullToEmpty(selectedNote.getContent()).equals(nullToEmpty(editorContent));
+        boolean convertHtmlToMarkdown = selectedNote.getContentFormat() == ContentFormat.HTML
+                && !nullToEmpty(displayedContent).equals(nullToEmpty(editorContent));
+        boolean contentChanged = selectedNote.getContentFormat() == ContentFormat.HTML
+                ? convertHtmlToMarkdown
+                : !nullToEmpty(originalContent).equals(nullToEmpty(editorContent));
         boolean pinnedChanged = selectedNote.isPinned() != pinnedBox.isSelected();
         boolean favoriteChanged = selectedNote.isFavorite() != favoriteBox.isSelected();
         boolean archivedChanged = selectedNote.isArchived() != archivedBox.isSelected();
         selectedNote.setTitle(titleField.getText());
         selectedNote.setCategoryName(categoryBox.getEditor().getText());
-        selectedNote.setContent(editorContent);
+        selectedNote.setContent(convertHtmlToMarkdown || selectedNote.getContentFormat() == ContentFormat.MARKDOWN
+                ? editorContent
+                : originalContent);
+        if (convertHtmlToMarkdown) {
+            selectedNote.setContentFormat(ContentFormat.MARKDOWN);
+        }
         selectedNote.setPinned(pinnedBox.isSelected());
         selectedNote.setFavorite(favoriteBox.isSelected());
         selectedNote.setArchived(archivedBox.isSelected());
@@ -932,9 +943,6 @@ public class MainView {
     }
 
     private String editorContentForSave(Note note) {
-        if (note != null && note.getContentFormat() == ContentFormat.HTML) {
-            return note.getContent();
-        }
         return contentEditor.getText();
     }
 

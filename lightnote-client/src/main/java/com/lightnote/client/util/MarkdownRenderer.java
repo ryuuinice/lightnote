@@ -41,10 +41,10 @@ public final class MarkdownRenderer {
                 </style>
                 </head>
                 <body>
-                %s
+                {{content}}
                 </body>
                 </html>
-                """.formatted(renderBody(markdown));
+                """.replace("{{content}}", renderBody(markdown));
     }
 
     public static String renderBody(String markdown) {

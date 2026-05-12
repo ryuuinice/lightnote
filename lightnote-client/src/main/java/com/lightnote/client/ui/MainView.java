@@ -8,7 +8,6 @@ import com.lightnote.client.repository.NoteRepository;
 import com.lightnote.client.repository.NoteRepository.CategorySummary;
 import com.lightnote.client.sync.ClientSyncService;
 import com.lightnote.client.util.AppLogger;
-import com.lightnote.client.util.HtmlContentSanitizer;
 import com.lightnote.client.util.HtmlTextExtractor;
 import com.lightnote.client.util.MarkdownRenderer;
 import com.lightnote.client.util.MarkdownTextExtractor;
@@ -65,77 +64,6 @@ public class MainView {
         SPLIT,
         PREVIEW
     }
-
-    private static final String EDITOR_STYLE = """
-            <style id="lightnote-editor-style">
-            body {
-                background: #ffffff;
-                color: #223046;
-                font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
-                font-size: 15px;
-                line-height: 1.82;
-                margin: 24px 60px 56px 60px;
-            }
-            p {
-                margin: 0 0 14px 0;
-            }
-            h1, h2, h3 {
-                color: #152033;
-                line-height: 1.3;
-                font-weight: 700;
-                margin: 28px 0 14px 0;
-            }
-            h1 {
-                font-size: 28px;
-                margin-top: 8px;
-            }
-            h2 {
-                font-size: 22px;
-            }
-            h3 {
-                font-size: 18px;
-            }
-            ul, ol {
-                margin: 0 0 16px 22px;
-                padding: 0;
-            }
-            li {
-                margin: 0 0 8px 0;
-            }
-            a { color: #3867d6; }
-            blockquote {
-                border-left: 3px solid #5b7cfa;
-                color: #4f5f76;
-                margin: 10px 0 16px 0;
-                padding: 2px 0 2px 14px;
-            }
-            pre, code {
-                background: #f3f6fb;
-                color: #1f2937;
-                border-radius: 4px;
-            }
-            pre {
-                margin: 12px 0 16px 0;
-                padding: 12px 14px;
-                white-space: pre-wrap;
-            }
-            code {
-                padding: 1px 4px;
-            }
-            hr {
-                border: none;
-                border-top: 1px solid #dce4f0;
-                margin: 20px 0;
-            }
-            ::-webkit-scrollbar { width: 8px; height: 8px; }
-            ::-webkit-scrollbar-track { background: transparent; }
-            ::-webkit-scrollbar-thumb {
-                background: #d6deea;
-                border-radius: 8px;
-            }
-            ::-webkit-scrollbar-thumb:hover { background: #b8c4d4; }
-            </style>
-            """;
 
     private final NoteRepository noteRepository;
     private final AppConfigRepository configRepository;
@@ -819,33 +747,36 @@ public class MainView {
         }
         selectedNote = note;
         loadingSelection = true;
-        if (note == null) {
-            titleField.clear();
-            categoryBox.getSelectionModel().clearSelection();
-            categoryBox.getEditor().clear();
-            contentEditor.clear();
-            contentEditor.setEditable(true);
-            refreshMarkdownPreview();
-            pinnedBox.setSelected(false);
-            favoriteBox.setSelected(false);
-            archivedBox.setSelected(false);
-            setEditorDisabled(true);
-            updateBreadcrumb();
-            updateEditorStatus("未选择笔记");
-        } else {
-            setEditorDisabled(false);
-            titleField.setText(nullToEmpty(note.getTitle()));
-            applyCategoryEditorValue(note.getCategoryName());
-            contentEditor.setText(editorTextForNote(note));
-            contentEditor.setEditable(true);
-            refreshMarkdownPreview();
-            pinnedBox.setSelected(note.isPinned());
-            favoriteBox.setSelected(note.isFavorite());
-            archivedBox.setSelected(note.isArchived());
-            updateBreadcrumb();
-            updateEditorStatus("已打开");
+        try {
+            if (note == null) {
+                titleField.clear();
+                categoryBox.getSelectionModel().clearSelection();
+                categoryBox.getEditor().clear();
+                contentEditor.clear();
+                contentEditor.setEditable(true);
+                refreshMarkdownPreview();
+                pinnedBox.setSelected(false);
+                favoriteBox.setSelected(false);
+                archivedBox.setSelected(false);
+                setEditorDisabled(true);
+                updateBreadcrumb();
+                updateEditorStatus("未选择笔记");
+            } else {
+                setEditorDisabled(false);
+                titleField.setText(nullToEmpty(note.getTitle()));
+                applyCategoryEditorValue(note.getCategoryName());
+                contentEditor.setText(editorTextForNote(note));
+                contentEditor.setEditable(true);
+                refreshMarkdownPreview();
+                pinnedBox.setSelected(note.isPinned());
+                favoriteBox.setSelected(note.isFavorite());
+                archivedBox.setSelected(note.isArchived());
+                updateBreadcrumb();
+                updateEditorStatus("已打开");
+            }
+        } finally {
+            loadingSelection = false;
         }
-        loadingSelection = false;
     }
 
     private void setEditorDisabled(boolean disabled) {
@@ -959,10 +890,6 @@ public class MainView {
     private void refreshMarkdownPreview() {
         if (selectedNote == null) {
             previewPane.getEngine().loadContent(MarkdownRenderer.renderDocument(""));
-            return;
-        }
-        if (selectedNote.getContentFormat() == ContentFormat.HTML) {
-            previewPane.getEngine().loadContent(toEditorHtml(selectedNote.getContent()));
             return;
         }
         previewPane.getEngine().loadContent(MarkdownRenderer.renderDocument(contentEditor.getText()));
@@ -1390,64 +1317,9 @@ public class MainView {
     }
 
     private void updateWordCount() {
-        String plainText = selectedNote != null && selectedNote.getContentFormat() == ContentFormat.HTML
-                ? plainText(selectedNote.getContent())
-                : MarkdownTextExtractor.toPlainText(contentEditor.getText());
+        String plainText = MarkdownTextExtractor.toPlainText(contentEditor.getText());
         long count = plainText.chars().filter(ch -> !Character.isWhitespace(ch)).count();
         wordCountLabel.setText(count + " 字");
-    }
-
-    private String toEditorHtml(String content) {
-        if (content == null || content.isBlank()) {
-            return editorDocument("");
-        }
-        content = HtmlContentSanitizer.normalizeForStorage(content);
-        if (content.isBlank()) {
-            return editorDocument("");
-        }
-        String trimmed = content.stripLeading();
-        String lowerTrimmed = trimmed.toLowerCase();
-        if (lowerTrimmed.startsWith("<html") || lowerTrimmed.startsWith("<!doctype")) {
-            return injectEditorStyle(content);
-        }
-        if (HtmlContentSanitizer.looksLikeHtmlMarkup(trimmed)) {
-            return editorDocument(content);
-        }
-        return editorDocument(escapeHtml(content).replace("\n", "<br>"));
-    }
-
-    private String editorDocument(String bodyHtml) {
-        return "<html><head>" + EDITOR_STYLE + "</head><body>" + bodyHtml + "</body></html>";
-    }
-
-    private String injectEditorStyle(String html) {
-        String withoutOldStyle = sanitizeEditorHtml(html);
-        String lowerHtml = withoutOldStyle.toLowerCase();
-        int headEnd = lowerHtml.indexOf("</head>");
-        if (headEnd >= 0) {
-            return withoutOldStyle.substring(0, headEnd) + EDITOR_STYLE + withoutOldStyle.substring(headEnd);
-        }
-        int htmlStartEnd = lowerHtml.indexOf(">");
-        if (lowerHtml.startsWith("<html") && htmlStartEnd >= 0) {
-            return withoutOldStyle.substring(0, htmlStartEnd + 1)
-                    + "<head>" + EDITOR_STYLE + "</head>"
-                    + withoutOldStyle.substring(htmlStartEnd + 1);
-        }
-        return editorDocument(withoutOldStyle);
-    }
-
-    private String sanitizeEditorHtml(String html) {
-        return HtmlContentSanitizer.sanitizeForStorage(html);
-    }
-
-    private String plainText(String html) {
-        return HtmlTextExtractor.toPlainText(html);
-    }
-
-    private String escapeHtml(String value) {
-        return value.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;");
     }
 
     private void bindContentDividerPersistence() {

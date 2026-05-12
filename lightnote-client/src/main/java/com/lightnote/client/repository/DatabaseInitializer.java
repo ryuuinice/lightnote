@@ -6,39 +6,53 @@ import java.util.ArrayList;
 import java.util.List;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
 public class DatabaseInitializer {
 
+    private static final int CURRENT_SCHEMA_VERSION = 1;
+
     private Path dataDirectory;
     private Path databasePath;
+    private final List<String> initializationLog = new ArrayList<>();
 
     public DatabaseInitializer() {
     }
 
     public void initialize() {
         List<String> failures = new ArrayList<>();
-        for (Path candidate : dataDirectoryCandidates()) {
+        initializationLog.clear();
+        initializationLog.add("开始初始化本地数据库");
+        for (CandidateDirectory candidate : dataDirectoryCandidates()) {
             try {
+                initializationLog.add("尝试数据目录 [" + candidate.source() + "]: " + candidate.path());
                 initializeAt(candidate);
+                initializationLog.add("数据库初始化完成: " + candidateDatabaseSummary());
                 return;
             } catch (Exception ex) {
-                failures.add(candidate + ": " + ex.getMessage());
+                initializationLog.add("初始化失败 [" + candidate.source() + "]: " + candidate.path() + " -> " + ex.getMessage());
+                failures.add(candidate.path() + ": " + ex.getMessage());
             }
         }
         throw new IllegalStateException("Failed to initialize local database. Tried " + failures);
     }
 
-    private void initializeAt(Path candidateDirectory) throws Exception {
+    private void initializeAt(CandidateDirectory candidate) throws Exception {
+        Path candidateDirectory = candidate.path();
         Path candidateDatabasePath = candidateDirectory.resolve("lightnote.db");
         try {
             Class.forName("org.sqlite.JDBC");
             Files.createDirectories(candidateDirectory);
+            verifyWritable(candidateDirectory);
             try (Connection connection = DriverManager.getConnection(jdbcUrl(candidateDatabasePath));
                  Statement statement = connection.createStatement()) {
                 tryEnableWal(statement);
                 statement.executeUpdate("PRAGMA foreign_keys=ON");
+                initializationLog.add("已启用 foreign_keys");
+                int currentVersion = readUserVersion(statement);
+                initializationLog.add("检测到数据库 schema 版本: " + currentVersion);
                 statement.executeUpdate("""
                         CREATE TABLE IF NOT EXISTS notes (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,6 +74,7 @@ public class DatabaseInitializer {
                             last_sync_time TEXT
                         )
                         """);
+                initializationLog.add("已确认 notes 表");
                 statement.executeUpdate("""
                         CREATE VIRTUAL TABLE IF NOT EXISTS note_fts USING fts5(
                             title,
@@ -69,13 +84,17 @@ public class DatabaseInitializer {
                             content_rowid='id'
                         )
                         """);
+                initializationLog.add("已确认 note_fts 索引");
                 statement.executeUpdate("""
                         CREATE TABLE IF NOT EXISTS app_config (
                             config_key TEXT PRIMARY KEY,
                             config_value TEXT
                         )
                         """);
+                initializationLog.add("已确认 app_config 表");
                 createFtsTriggers(statement);
+                initializationLog.add("已确认 FTS 触发器");
+                applyMigrations(statement, currentVersion);
             }
             this.dataDirectory = candidateDirectory;
             this.databasePath = candidateDatabasePath;
@@ -110,42 +129,95 @@ public class DatabaseInitializer {
     private void tryEnableWal(Statement statement) {
         try {
             statement.executeUpdate("PRAGMA journal_mode=WAL");
+            initializationLog.add("已启用 WAL 模式");
         } catch (SQLException ignored) {
+            initializationLog.add("WAL 模式不可用，继续使用默认 journal_mode");
             // Some locked-down filesystems reject WAL sidecar file changes. The app can still run safely without WAL.
         }
+    }
+
+    private void applyMigrations(Statement statement, int currentVersion) throws SQLException {
+        if (currentVersion >= CURRENT_SCHEMA_VERSION) {
+            initializationLog.add("数据库无需迁移，当前版本已是 " + currentVersion);
+            return;
+        }
+        for (int nextVersion = currentVersion + 1; nextVersion <= CURRENT_SCHEMA_VERSION; nextVersion++) {
+            applyMigration(statement, nextVersion);
+        }
+        initializationLog.add("数据库迁移完成: " + currentVersion + " -> " + CURRENT_SCHEMA_VERSION);
+    }
+
+    private void applyMigration(Statement statement, int targetVersion) throws SQLException {
+        switch (targetVersion) {
+            case 1 -> {
+                initializationLog.add("执行迁移 v1: 建立基线 schema 版本");
+                statement.executeUpdate("PRAGMA user_version = 1");
+            }
+            default -> throw new IllegalStateException("Unsupported schema version: " + targetVersion);
+        }
+    }
+
+    private int readUserVersion(Statement statement) throws SQLException {
+        try (ResultSet resultSet = statement.executeQuery("PRAGMA user_version")) {
+            return resultSet.next() ? resultSet.getInt(1) : 0;
+        }
+    }
+
+    private void verifyWritable(Path directory) throws Exception {
+        Path probe = directory.resolve(".lightnote-write-probe");
+        Files.writeString(probe, "ok");
+        Files.deleteIfExists(probe);
+        initializationLog.add("已确认目录可写: " + directory);
+    }
+
+    public Path getDataDirectory() {
+        return dataDirectory;
     }
 
     public Path getDatabasePath() {
         return databasePath;
     }
 
-    private List<Path> dataDirectoryCandidates() {
-        List<Path> candidates = new ArrayList<>();
+    public List<String> initializationLog() {
+        return List.copyOf(initializationLog);
+    }
+
+    private String candidateDatabaseSummary() {
+        return "dataDir=" + dataDirectory + ", db=" + databasePath;
+    }
+
+    private List<CandidateDirectory> dataDirectoryCandidates() {
+        List<CandidateDirectory> candidates = new ArrayList<>();
         String configuredDataDir = System.getProperty("lightnote.dataDir");
         if (configuredDataDir == null || configuredDataDir.isBlank()) {
             configuredDataDir = System.getenv("LIGHTNOTE_DATA_DIR");
         }
         if (configuredDataDir != null && !configuredDataDir.isBlank()) {
-            addCandidate(candidates, Path.of(configuredDataDir));
+            addCandidate(candidates, Path.of(configuredDataDir), "configured");
         }
-        addCandidate(candidates, Path.of(System.getProperty("user.home"), ".lightnote"));
+        addCandidate(candidates, Path.of(System.getProperty("user.home"), ".lightnote"), "user-home");
         String localAppData = System.getenv("LOCALAPPDATA");
         if (localAppData != null && !localAppData.isBlank()) {
-            addCandidate(candidates, Path.of(localAppData, "LightNote"));
+            addCandidate(candidates, Path.of(localAppData, "LightNote"), "local-app-data");
         }
-        addCandidate(candidates, Path.of(System.getProperty("user.dir"), ".lightnote"));
+        addCandidate(candidates, Path.of(System.getProperty("user.dir"), ".lightnote"), "working-directory");
+        addCandidate(candidates, Path.of(System.getProperty("java.io.tmpdir"), "LightNote"), "temp-directory");
         return candidates;
     }
 
-    private void addCandidate(List<Path> candidates, Path path) {
+    private void addCandidate(List<CandidateDirectory> candidates, Path path, String source) {
         Path candidate = path.toAbsolutePath().normalize();
-        if (candidate.getParent() == null || candidates.contains(candidate)) {
+        boolean duplicate = candidates.stream().anyMatch(item -> item.path().equals(candidate));
+        if (candidate.getParent() == null || duplicate) {
             return;
         }
-        candidates.add(candidate);
+        candidates.add(new CandidateDirectory(candidate, source));
     }
 
     private String jdbcUrl(Path path) {
         return "jdbc:sqlite:" + path;
+    }
+
+    private record CandidateDirectory(Path path, String source) {
     }
 }

@@ -6,6 +6,9 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Optional;
 
 public class AppConfigRepository {
@@ -102,6 +105,76 @@ public class AppConfigRepository {
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to delete config " + key, ex);
         }
+    }
+
+    public List<String> categoryCatalog() {
+        return get("category_catalog").map(this::decodeCategoryCatalog).orElseGet(List::of);
+    }
+
+    public void addCategory(String categoryName) {
+        String normalized = normalizeCategoryName(categoryName);
+        if (normalized.isEmpty()) {
+            return;
+        }
+        LinkedHashSet<String> categories = new LinkedHashSet<>(categoryCatalog());
+        categories.add(normalized);
+        saveCategoryCatalog(categories);
+    }
+
+    public void renameCategory(String previousName, String nextName) {
+        String previous = normalizeCategoryName(previousName);
+        String next = normalizeCategoryName(nextName);
+        if (previous.isEmpty() || next.isEmpty()) {
+            return;
+        }
+        LinkedHashSet<String> categories = new LinkedHashSet<>(categoryCatalog());
+        if (!categories.remove(previous)) {
+            categories.add(next);
+        } else {
+            categories.add(next);
+        }
+        saveCategoryCatalog(categories);
+    }
+
+    public void removeCategory(String categoryName) {
+        String normalized = normalizeCategoryName(categoryName);
+        if (normalized.isEmpty()) {
+            return;
+        }
+        LinkedHashSet<String> categories = new LinkedHashSet<>(categoryCatalog());
+        if (categories.remove(normalized)) {
+            saveCategoryCatalog(categories);
+        }
+    }
+
+    private void saveCategoryCatalog(Iterable<String> categoryNames) {
+        List<String> normalized = new ArrayList<>();
+        LinkedHashSet<String> seen = new LinkedHashSet<>();
+        for (String categoryName : categoryNames) {
+            String value = normalizeCategoryName(categoryName);
+            if (!value.isEmpty() && seen.add(value)) {
+                normalized.add(value);
+            }
+        }
+        put("category_catalog", String.join("\n", normalized));
+    }
+
+    private List<String> decodeCategoryCatalog(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return List.of();
+        }
+        LinkedHashSet<String> categories = new LinkedHashSet<>();
+        for (String line : raw.split("\\R")) {
+            String normalized = normalizeCategoryName(line);
+            if (!normalized.isEmpty()) {
+                categories.add(normalized);
+            }
+        }
+        return new ArrayList<>(categories);
+    }
+
+    private String normalizeCategoryName(String value) {
+        return value == null ? "" : value.strip();
     }
 
     private String trimTrailingSlash(String value) {

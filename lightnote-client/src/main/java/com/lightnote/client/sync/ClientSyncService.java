@@ -8,12 +8,16 @@ import com.lightnote.client.remote.SyncConflictItem;
 import com.lightnote.client.remote.SyncPushResponse;
 import com.lightnote.client.repository.AppConfigRepository;
 import com.lightnote.client.repository.NoteRepository;
+import com.lightnote.client.util.AppLogger;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.logging.Logger;
 
 public class ClientSyncService {
+
+    private static final Logger LOGGER = AppLogger.logger(ClientSyncService.class);
 
     private final NoteRepository noteRepository;
     private final AppConfigRepository configRepository;
@@ -37,6 +41,7 @@ public class ClientSyncService {
         LightNoteApiClient apiClient = apiClientFactory.apply(serverUrl);
         LoginResponse response = apiClient.login(username, password);
         configRepository.saveLogin(serverUrl, response.token());
+        LOGGER.info("登录成功: serverUrl=" + serverUrl + ", user=" + username);
         return response;
     }
 
@@ -48,6 +53,9 @@ public class ClientSyncService {
 
         long lastSyncVersion = configRepository.lastSyncVersion();
         List<Note> pending = noteRepository.listPendingSync();
+        LOGGER.info("开始同步: serverUrl=" + serverUrl
+                + ", lastSyncVersion=" + lastSyncVersion
+                + ", pending=" + pending.size());
         Map<String, String> pendingUpdateTimes = new HashMap<>();
         Map<String, String> conflictCopyUuids = new HashMap<>();
         pending.forEach(note -> pendingUpdateTimes.put(note.getNoteUuid(), note.getUpdateTime()));
@@ -75,6 +83,10 @@ public class ClientSyncService {
 
         long finalVersion = Math.max(pushResponse.serverVersion(), nextSince);
         configRepository.saveLastSyncVersion(finalVersion);
+        LOGGER.info("同步完成: pushed=" + pushResponse.successItems().size()
+                + ", conflicts=" + pushResponse.conflictItems().size()
+                + ", pulled=" + pulled
+                + ", finalVersion=" + finalVersion);
         return new SyncSummary(
                 pending.size(),
                 pushResponse.successItems().size(),

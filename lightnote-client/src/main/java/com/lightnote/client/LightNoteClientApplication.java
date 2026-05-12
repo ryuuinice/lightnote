@@ -7,12 +7,17 @@ import com.lightnote.client.sync.ClientSyncService;
 import com.lightnote.client.ui.DarkTitleBar;
 import com.lightnote.client.ui.LoginView;
 import com.lightnote.client.ui.MainView;
+import com.lightnote.client.util.AppLogger;
 import javafx.application.Application;
 import javafx.scene.Scene;
 import javafx.scene.image.Image;
 import javafx.stage.Stage;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public class LightNoteClientApplication extends Application {
+
+    private static final Logger LOGGER = AppLogger.logger(LightNoteClientApplication.class);
 
     private Stage stage;
     private DatabaseInitializer initializer;
@@ -23,12 +28,21 @@ public class LightNoteClientApplication extends Application {
     @Override
     public void start(Stage stage) {
         this.stage = stage;
-        initializer = new DatabaseInitializer();
-        initializer.initialize();
+        installGlobalExceptionLogging();
+        try {
+            initializer = new DatabaseInitializer();
+            initializer.initialize();
+            AppLogger.configure(initializer.getDataDirectory());
+            initializer.initializationLog().forEach(LOGGER::info);
+        } catch (RuntimeException ex) {
+            LOGGER.log(Level.SEVERE, "客户端启动失败: 数据库初始化未完成", ex);
+            throw ex;
+        }
 
         noteRepository = new NoteRepository(initializer.getDatabasePath());
         configRepository = new AppConfigRepository(initializer.getDatabasePath());
         syncService = new ClientSyncService(noteRepository, configRepository);
+        LOGGER.info("客户端启动成功");
 
         if (configRepository.token().isPresent()) {
             showMain();
@@ -45,11 +59,13 @@ public class LightNoteClientApplication extends Application {
     }
 
     private void showLogin() {
+        LOGGER.info("显示登录界面");
         LoginView loginView = new LoginView(configRepository, syncService, this::showMain);
         setScene(loginView.getRoot(), 900, 620);
     }
 
     private void showMain() {
+        LOGGER.info("显示主界面");
         MainView mainView = new MainView(noteRepository, configRepository, syncService, this::showLogin);
         setScene(mainView.getRoot(), 1180, 760);
     }
@@ -70,5 +86,10 @@ public class LightNoteClientApplication extends Application {
 
     public static void main(String[] args) {
         launch(args);
+    }
+
+    private void installGlobalExceptionLogging() {
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) ->
+                LOGGER.log(Level.SEVERE, "未捕获异常 [" + thread.getName() + "]", throwable));
     }
 }

@@ -4,14 +4,19 @@ import com.lightnote.client.model.Note;
 import com.lightnote.client.model.NoteFilter;
 import com.lightnote.client.repository.AppConfigRepository;
 import com.lightnote.client.repository.NoteRepository;
+import com.lightnote.client.repository.NoteRepository.CategorySummary;
 import com.lightnote.client.sync.ClientSyncService;
+import com.lightnote.client.util.AppLogger;
 import com.lightnote.client.util.HtmlContentSanitizer;
 import com.lightnote.client.util.HtmlTextExtractor;
 import javafx.application.Platform;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import javafx.animation.PauseTransition;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
@@ -20,14 +25,17 @@ import javafx.geometry.Pos;
 import javafx.scene.Parent;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.Control;
 import javafx.scene.control.ContentDisplay;
+import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.ToolBar;
 import javafx.scene.control.Tooltip;
 import javafx.scene.Node;
@@ -39,12 +47,16 @@ import javafx.scene.layout.VBox;
 import javafx.scene.web.HTMLEditor;
 import javafx.scene.text.Text;
 import javafx.scene.text.TextFlow;
+import javafx.stage.Window;
 import javafx.util.Duration;
 
 public class MainView {
 
+    private static final Logger LOGGER = AppLogger.logger(MainView.class);
+
     private static final String NOTE_EDITOR_DIVIDER_KEY = "note_editor_divider_position";
-    private static final String CONFLICT_COPY_MARKER = " - 冲突副本 - ";
+    private static final String CONFLICT_COPY_MARKER = "冲突副本";
+    private static final String UNCATEGORIZED_LABEL = "未分类";
 
     private static final String EDITOR_STYLE = """
             <style id="lightnote-editor-style">
@@ -127,7 +139,7 @@ public class MainView {
     private final TextField searchField = new TextField();
     private final Button clearSearchButton = new Button("清空");
     private final TextField titleField = new TextField();
-    private final TextField categoryField = new TextField();
+    private final ComboBox<String> categoryBox = new ComboBox<>();
     private final HTMLEditor contentEditor = new HTMLEditor();
     private final Button syncButton = new Button("同步");
     private final CheckBox pinnedBox = new CheckBox("置顶");
@@ -141,8 +153,14 @@ public class MainView {
     private final Label wordCountLabel = new Label("0 字");
     private final Map<NoteFilter, Label> navigationCountLabels = new EnumMap<>(NoteFilter.class);
     private final Map<NoteFilter, Button> navigationButtons = new EnumMap<>(NoteFilter.class);
+    private final Map<String, Button> categoryButtons = new HashMap<>();
+    private final Map<String, Long> categoryCounts = new HashMap<>();
     private final Label emptyStateTitleLabel = new Label();
     private final Label emptyStateDescriptionLabel = new Label();
+    private final VBox categoryListBox = new VBox(6);
+    private final Button addCategoryButton = new Button("+ 分类");
+    private final Button renameCategoryButton = new Button("重命名");
+    private final Button deleteCategoryButton = new Button("删除");
     private final PauseTransition autosaveDelay = new PauseTransition(Duration.millis(700));
     private final PauseTransition autoSyncDelay = new PauseTransition(Duration.millis(2500));
     private final PauseTransition manualSyncFeedbackDelay = new PauseTransition(Duration.millis(1400));
@@ -158,6 +176,7 @@ public class MainView {
     private String localFailureNoteUuid;
     private String lastLocalFailureMessage;
     private NoteFilter currentFilter = NoteFilter.ALL;
+    private String currentCategoryName;
 
     public MainView(
             NoteRepository noteRepository,
@@ -204,17 +223,19 @@ public class MainView {
         Label navTitle = new Label("浏览");
         navTitle.getStyleClass().add("section-label");
 
-        Button allNotes = navButton("全部笔记", NoteFilter.ALL);
-        Button today = navButton("今天", NoteFilter.TODAY);
-        Button week = navButton("最近 7 天", NoteFilter.RECENT_7_DAYS);
+        Button allNotes = navButton("全部笔记", NoteFilter.ALL, true);
+        Button today = navButton("今天", NoteFilter.TODAY, true);
+        Button week = navButton("最近 7 天", NoteFilter.RECENT_7_DAYS, true);
         Button favorites = navButton("收藏", NoteFilter.FAVORITES, true);
         Button conflicts = navButton("冲突", NoteFilter.CONFLICT_COPIES, true);
         Button archive = navButton("归档", NoteFilter.ARCHIVED, true);
 
         Label categoryTitle = new Label("分类");
         categoryTitle.getStyleClass().add("section-label");
-        Label defaultCategory = new Label("默认");
-        defaultCategory.getStyleClass().add("category-placeholder");
+        categoryListBox.getStyleClass().add("category-list");
+        configureCategoryActions();
+        VBox categoryActions = new VBox(6, addCategoryButton, renameCategoryButton, deleteCategoryButton);
+        categoryActions.getStyleClass().add("category-actions");
 
         Region spacer = new Region();
         VBox.setVgrow(spacer, Priority.ALWAYS);
@@ -237,7 +258,8 @@ public class MainView {
                 archive,
                 new Separator(),
                 categoryTitle,
-                defaultCategory,
+                categoryActions,
+                categoryListBox,
                 spacer,
                 settings);
         sidebar.setPrefWidth(120);
@@ -301,11 +323,13 @@ public class MainView {
     private Parent buildNavButtonGraphic(String text, Label countLabel) {
         Label titleLabel = new Label(text);
         titleLabel.getStyleClass().add("nav-button-label");
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
+        titleLabel.setWrapText(true);
+        titleLabel.setMaxWidth(Double.MAX_VALUE);
+        titleLabel.setMinWidth(0);
+        HBox.setHgrow(titleLabel, Priority.ALWAYS);
         HBox row = countLabel == null
-                ? new HBox(8, titleLabel, spacer)
-                : new HBox(8, titleLabel, spacer, countLabel);
+                ? new HBox(8, titleLabel)
+                : new HBox(8, titleLabel, countLabel);
         row.setAlignment(Pos.CENTER_LEFT);
         row.setMaxWidth(Double.MAX_VALUE);
         return row;
@@ -329,8 +353,10 @@ public class MainView {
         titleField.setPromptText("标题");
         titleField.getStyleClass().add("title-field");
 
-        categoryField.setPromptText("分类");
-        categoryField.getStyleClass().add("category-field");
+        categoryBox.setEditable(true);
+        categoryBox.setPromptText("分类");
+        categoryBox.getStyleClass().add("category-field");
+        categoryBox.setVisibleRowCount(10);
 
         contentEditor.getStyleClass().add("rich-editor");
         contentEditor.setPrefHeight(620);
@@ -360,9 +386,9 @@ public class MainView {
         topLine.setAlignment(Pos.CENTER_LEFT);
         topLine.getStyleClass().add("document-topline");
 
-        HBox meta = new HBox(10, categoryField, pinnedBox, favoriteBox, archivedBox);
+        HBox meta = new HBox(10, categoryBox, pinnedBox, favoriteBox, archivedBox);
         meta.setAlignment(Pos.CENTER_LEFT);
-        HBox.setHgrow(categoryField, Priority.ALWAYS);
+        HBox.setHgrow(categoryBox, Priority.ALWAYS);
         meta.getStyleClass().add("document-meta");
 
         Region footerSpacer = new Region();
@@ -399,12 +425,12 @@ public class MainView {
         autosaveDelay.setOnFinished(event -> saveSelectedNote());
         autoSyncDelay.setOnFinished(event -> autoSyncNow());
         titleField.textProperty().addListener((obs, oldValue, newValue) -> scheduleAutosave());
-        categoryField.textProperty().addListener((obs, oldValue, newValue) -> scheduleAutosave());
+        categoryBox.getEditor().textProperty().addListener((obs, oldValue, newValue) -> scheduleAutosave());
         contentEditor.setOnKeyReleased(event -> scheduleAutosave());
         contentEditor.setOnMouseReleased(event -> scheduleAutosave());
-        pinnedBox.selectedProperty().addListener((obs, oldValue, newValue) -> scheduleAutosave());
-        favoriteBox.selectedProperty().addListener((obs, oldValue, newValue) -> scheduleAutosave());
-        archivedBox.selectedProperty().addListener((obs, oldValue, newValue) -> scheduleAutosave());
+        pinnedBox.selectedProperty().addListener((obs, oldValue, newValue) -> saveToggleChange());
+        favoriteBox.selectedProperty().addListener((obs, oldValue, newValue) -> saveToggleChange());
+        archivedBox.selectedProperty().addListener((obs, oldValue, newValue) -> saveToggleChange());
     }
 
     private Parent buildEmptyState() {
@@ -432,7 +458,7 @@ public class MainView {
     private void updateEmptyStateText() {
         if (isSearchActive()) {
             emptyStateTitleLabel.setText("没有匹配结果");
-            emptyStateDescriptionLabel.setText("换个关键词试试，或点击清空回到当前筛选列表。");
+            emptyStateDescriptionLabel.setText("换个关键词试试，或点击清空回到" + contextLabel() + "。");
             return;
         }
         emptyStateTitleLabel.setText(emptyStateTitle());
@@ -440,6 +466,9 @@ public class MainView {
     }
 
     private String emptyStateTitle() {
+        if (isCategoryFilterActive()) {
+            return categoryDisplayName(currentCategoryName) + "下还没有笔记";
+        }
         return switch (currentFilter) {
             case TODAY -> "今天还没有笔记";
             case RECENT_7_DAYS -> "最近 7 天还没有笔记";
@@ -451,6 +480,9 @@ public class MainView {
     }
 
     private String emptyStateDescription() {
+        if (isCategoryFilterActive()) {
+            return "你可以在当前分类下新建笔记，或切回全部笔记查看更多内容。";
+        }
         return switch (currentFilter) {
             case TODAY, RECENT_7_DAYS, ALL -> "点击上方“新建”，从第一条笔记开始。";
             case FAVORITES -> "把重要内容标记为收藏，它们会集中出现在这里。";
@@ -461,14 +493,25 @@ public class MainView {
 
     private void setCurrentFilter(NoteFilter filter) {
         currentFilter = filter == null ? NoteFilter.ALL : filter;
+        currentCategoryName = null;
         updateNavigationSelection();
+        updateCategorySelection();
+        updateEmptyStateText();
+        updateBreadcrumb();
+    }
+
+    private void setCurrentCategory(String categoryName) {
+        currentCategoryName = normalizeCategoryName(categoryName);
+        currentFilter = NoteFilter.ALL;
+        updateNavigationSelection();
+        updateCategorySelection();
         updateEmptyStateText();
         updateBreadcrumb();
     }
 
     private void updateNavigationSelection() {
         navigationButtons.forEach((filter, button) -> {
-            boolean active = filter == currentFilter;
+            boolean active = !isCategoryFilterActive() && filter == currentFilter;
             if (active) {
                 if (!button.getStyleClass().contains("nav-button-active")) {
                     button.getStyleClass().add("nav-button-active");
@@ -480,11 +523,12 @@ public class MainView {
     }
 
     private void updateBreadcrumb() {
+        String context = contextLabel();
         if (selectedNote == null) {
-            breadcrumbLabel.setText(filterLabel(currentFilter));
+            breadcrumbLabel.setText(context);
             return;
         }
-        breadcrumbLabel.setText(filterLabel(currentFilter) + " / " + nullToEmpty(selectedNote.getTitle()));
+        breadcrumbLabel.setText(context + " / " + nullToEmpty(selectedNote.getTitle()));
     }
 
     private String filterLabel(NoteFilter filter) {
@@ -496,6 +540,130 @@ public class MainView {
             case ARCHIVED -> "归档";
             case CONFLICT_COPIES -> "冲突";
         };
+    }
+
+    private String contextLabel() {
+        return isCategoryFilterActive()
+                ? "分类 / " + categoryDisplayName(currentCategoryName)
+                : filterLabel(currentFilter);
+    }
+
+    private boolean isCategoryFilterActive() {
+        return currentCategoryName != null;
+    }
+
+    private boolean categoryMatchesCurrentFilter(Note note) {
+        if (!isCategoryFilterActive()) {
+            return true;
+        }
+        return nullToEmpty(normalizeCategoryName(note == null ? null : note.getCategoryName()))
+                .equals(nullToEmpty(currentCategoryName));
+    }
+
+    private String normalizeCategoryName(String categoryName) {
+        if (categoryName == null) {
+            return null;
+        }
+        String normalized = categoryName.strip();
+        return normalized.isEmpty() ? "" : normalized;
+    }
+
+    private String categoryDisplayName(String categoryName) {
+        String normalized = normalizeCategoryName(categoryName);
+        return normalized == null || normalized.isEmpty() ? UNCATEGORIZED_LABEL : normalized;
+    }
+
+    private void updateCategorySelection() {
+        categoryButtons.forEach((categoryName, button) -> {
+            boolean active = isCategoryFilterActive() && categoryName.equals(currentCategoryName);
+            if (active) {
+                if (!button.getStyleClass().contains("nav-button-active")) {
+                    button.getStyleClass().add("nav-button-active");
+                }
+            } else {
+                button.getStyleClass().remove("nav-button-active");
+            }
+        });
+        updateCategoryActionState();
+    }
+
+    private void configureCategoryActions() {
+        addCategoryButton.getStyleClass().add("secondary-nav-button");
+        renameCategoryButton.getStyleClass().add("secondary-nav-button");
+        deleteCategoryButton.getStyleClass().add("secondary-nav-button");
+        addCategoryButton.setMaxWidth(Double.MAX_VALUE);
+        renameCategoryButton.setMaxWidth(Double.MAX_VALUE);
+        deleteCategoryButton.setMaxWidth(Double.MAX_VALUE);
+        addCategoryButton.setOnAction(event -> createCategory());
+        renameCategoryButton.setOnAction(event -> renameCurrentCategory());
+        deleteCategoryButton.setOnAction(event -> deleteCurrentCategoryIfEmpty());
+        updateCategoryActionState();
+    }
+
+    private void updateCategoryActionState() {
+        boolean hasSelectedCategory = isCategoryFilterActive()
+                && currentCategoryName != null
+                && !currentCategoryName.isBlank();
+        renameCategoryButton.setDisable(!hasSelectedCategory);
+        long count = hasSelectedCategory ? categoryCounts.getOrDefault(currentCategoryName, 0L) : -1L;
+        deleteCategoryButton.setDisable(!hasSelectedCategory || count > 0);
+    }
+
+    private void createCategory() {
+        TextInputDialog dialog = createCategoryInputDialog("新建分类", "", "输入分类名称");
+        dialog.showAndWait()
+                .map(this::normalizeCategoryName)
+                .filter(name -> name != null && !name.isBlank())
+                .ifPresent(categoryName -> {
+                    configRepository.addCategory(categoryName);
+                    setCurrentCategory(categoryName);
+                    refreshNotes();
+                });
+    }
+
+    private void renameCurrentCategory() {
+        if (!isCategoryFilterActive() || currentCategoryName == null || currentCategoryName.isBlank()) {
+            return;
+        }
+        TextInputDialog dialog = createCategoryInputDialog("重命名分类", currentCategoryName, "输入新的分类名称");
+        dialog.showAndWait()
+                .map(this::normalizeCategoryName)
+                .filter(name -> name != null && !name.isBlank())
+                .ifPresent(nextName -> {
+                    noteRepository.renameCategory(currentCategoryName, nextName);
+                    configRepository.renameCategory(currentCategoryName, nextName);
+                    if (selectedNote != null && currentCategoryName.equals(normalizeCategoryName(selectedNote.getCategoryName()))) {
+                        selectedNote.setCategoryName(nextName);
+                    }
+                    setCurrentCategory(nextName);
+                    refreshNotes();
+                });
+    }
+
+    private void deleteCurrentCategoryIfEmpty() {
+        if (!isCategoryFilterActive() || currentCategoryName == null || currentCategoryName.isBlank()) {
+            return;
+        }
+        if (categoryCounts.getOrDefault(currentCategoryName, 0L) > 0) {
+            saveStatusLabel.setText("请先清空这个分类下的笔记，再删除分类");
+            return;
+        }
+        configRepository.removeCategory(currentCategoryName);
+        setCurrentFilter(NoteFilter.ALL);
+        refreshNotes();
+        saveStatusLabel.setText("已删除空分类");
+    }
+
+    private TextInputDialog createCategoryInputDialog(String title, String initialValue, String promptText) {
+        TextInputDialog dialog = new TextInputDialog(initialValue);
+        dialog.setTitle(title);
+        dialog.setHeaderText(null);
+        dialog.setContentText(promptText);
+        Window owner = root.getScene() == null ? null : root.getScene().getWindow();
+        if (owner != null) {
+            dialog.initOwner(owner);
+        }
+        return dialog;
     }
 
     private void configureEditorToolbar() {
@@ -610,8 +778,9 @@ public class MainView {
     private void refreshNotes() {
         try {
             Note selected = selectedNote;
-            List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter);
+            List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter, currentCategoryName);
             refreshNavigationCounts();
+            refreshCategoryList();
             clearLocalFailure();
             suppressSelectionChange = true;
             try {
@@ -665,8 +834,9 @@ public class MainView {
         Note editingNote = selectedNote;
         try {
             String selectedUuid = selectedNote.getNoteUuid();
-            List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter);
+            List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter, currentCategoryName);
             refreshNavigationCounts();
+            refreshCategoryList();
             clearLocalFailure();
             suppressSelectionChange = true;
             try {
@@ -687,6 +857,7 @@ public class MainView {
             selectedNote.setSyncStatus(refreshedNote.getSyncStatus());
             selectedNote.setServerVersion(refreshedNote.getServerVersion());
             selectedNote.setUpdateTime(refreshedNote.getUpdateTime());
+            selectedNote.setCategoryName(refreshedNote.getCategoryName());
             updateTimeLabel.setText("更新 " + selectedNote.getUpdateTime());
             suppressSelectionChange = true;
             try {
@@ -704,6 +875,10 @@ public class MainView {
     private void createNote() {
         try {
             Note note = noteRepository.createEmpty();
+            if (isCategoryFilterActive()) {
+                note.setCategoryName(currentCategoryName);
+                noteRepository.save(note);
+            }
             searchField.clear();
             refreshNotes();
             clearLocalFailure();
@@ -727,7 +902,8 @@ public class MainView {
         loadingSelection = true;
         if (note == null) {
             titleField.clear();
-            categoryField.clear();
+            categoryBox.getSelectionModel().clearSelection();
+            categoryBox.getEditor().clear();
             contentEditor.setHtmlText(toEditorHtml(""));
             pinnedBox.setSelected(false);
             favoriteBox.setSelected(false);
@@ -738,7 +914,7 @@ public class MainView {
         } else {
             setEditorDisabled(false);
             titleField.setText(nullToEmpty(note.getTitle()));
-            categoryField.setText(nullToEmpty(note.getCategoryName()));
+            applyCategoryEditorValue(note.getCategoryName());
             contentEditor.setHtmlText(toEditorHtml(note.getContent()));
             pinnedBox.setSelected(note.isPinned());
             favoriteBox.setSelected(note.isFavorite());
@@ -751,7 +927,7 @@ public class MainView {
 
     private void setEditorDisabled(boolean disabled) {
         titleField.setDisable(disabled);
-        categoryField.setDisable(disabled);
+        categoryBox.setDisable(disabled);
         contentEditor.setDisable(disabled);
         pinnedBox.setDisable(disabled);
         favoriteBox.setDisable(disabled);
@@ -762,7 +938,7 @@ public class MainView {
         if (loadingSelection || selectedNote == null) {
             return;
         }
-        breadcrumbLabel.setText(filterLabel(currentFilter) + " / " + titleField.getText());
+        breadcrumbLabel.setText(contextLabel() + " / " + titleField.getText());
         saveStatusLabel.setText("正在输入...");
         updateSyncLamp(selectedNote);
         updateWordCount();
@@ -777,9 +953,16 @@ public class MainView {
         if (selectedNote == null || loadingSelection) {
             return true;
         }
+        boolean titleChanged = !nullToEmpty(selectedNote.getTitle()).equals(nullToEmpty(titleField.getText()));
+        boolean categoryChanged = !nullToEmpty(normalizeCategoryName(selectedNote.getCategoryName()))
+                .equals(nullToEmpty(normalizeCategoryName(categoryBox.getEditor().getText())));
+        boolean contentChanged = !nullToEmpty(selectedNote.getContent())
+                .equals(nullToEmpty(sanitizeEditorHtml(contentEditor.getHtmlText())));
+        boolean pinnedChanged = selectedNote.isPinned() != pinnedBox.isSelected();
+        boolean favoriteChanged = selectedNote.isFavorite() != favoriteBox.isSelected();
         boolean archivedChanged = selectedNote.isArchived() != archivedBox.isSelected();
         selectedNote.setTitle(titleField.getText());
-        selectedNote.setCategoryName(categoryField.getText());
+        selectedNote.setCategoryName(categoryBox.getEditor().getText());
         selectedNote.setContent(sanitizeEditorHtml(contentEditor.getHtmlText()));
         selectedNote.setPinned(pinnedBox.isSelected());
         selectedNote.setFavorite(favoriteBox.isSelected());
@@ -793,15 +976,32 @@ public class MainView {
         clearLocalFailure();
         updateEditorStatus(scheduleSync ? "已保存到本地，等待同步" : "已保存到本地");
         refreshNavigationCounts();
+        refreshCategoryList();
         if (scheduleSync) {
             scheduleAutoSync();
         }
-        if (archivedChanged) {
+        boolean needsFullReload = archivedChanged
+                || categoryChanged
+                || (isCategoryFilterActive() && !categoryMatchesCurrentFilter(selectedNote))
+                || (favoriteChanged && currentFilter == NoteFilter.FAVORITES)
+                || (contentChanged && isSearchActive())
+                || (titleChanged && isSearchActive());
+        boolean needsCardRefresh = titleChanged || categoryChanged || pinnedChanged || favoriteChanged || archivedChanged;
+        if (needsFullReload) {
             refreshNotes();
-        } else {
+        } else if (needsCardRefresh) {
+            refreshCategoryOptions();
             noteList.refresh();
         }
         return true;
+    }
+
+    private void saveToggleChange() {
+        if (loadingSelection || selectedNote == null) {
+            return;
+        }
+        autosaveDelay.stop();
+        saveSelectedNote();
     }
 
     private void deleteSelectedNote() {
@@ -896,6 +1096,7 @@ public class MainView {
                     syncInProgress = false;
                     syncFailureActive = true;
                     lastSyncError = normalizeErrorMessage(ex, "同步失败");
+                    LOGGER.log(Level.WARNING, "同步失败", ex);
                     saveStatusLabel.setText((manual ? "同步失败: " : "自动同步失败: ") + lastSyncError);
                     setSyncLamp("unsynced", "同步失败: " + lastSyncError);
                     if (syncButton != null) {
@@ -931,8 +1132,9 @@ public class MainView {
 
     private void refreshNotesAndSelect(String noteUuid) {
         try {
-            List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter);
+            List<Note> loaded = noteRepository.listByFilter(searchField.getText(), currentFilter, currentCategoryName);
             refreshNavigationCounts();
+            refreshCategoryList();
             clearLocalFailure();
             notes.setAll(loaded);
             if (noteUuid == null || noteUuid.isBlank()) {
@@ -966,9 +1168,101 @@ public class MainView {
     }
 
     private void refreshNavigationCounts() {
+        updateNavigationCount(NoteFilter.ALL);
+        updateNavigationCount(NoteFilter.TODAY);
+        updateNavigationCount(NoteFilter.RECENT_7_DAYS);
         updateNavigationCount(NoteFilter.FAVORITES);
         updateNavigationCount(NoteFilter.CONFLICT_COPIES);
         updateNavigationCount(NoteFilter.ARCHIVED);
+    }
+
+    private void refreshCategoryList() {
+        List<CategorySummary> summaries = noteRepository.listCategorySummaries();
+        categoryCounts.clear();
+        for (CategorySummary summary : summaries) {
+            categoryCounts.put(normalizeCategoryName(summary.name()), summary.count());
+        }
+        List<String> categoryNames = new java.util.ArrayList<>(configRepository.categoryCatalog());
+        for (CategorySummary summary : summaries) {
+            String categoryName = normalizeCategoryName(summary.name());
+            if (!categoryNames.contains(categoryName)) {
+                categoryNames.add(categoryName);
+            }
+        }
+        categoryNames.sort((left, right) -> {
+            boolean leftUncategorized = left != null && left.isEmpty();
+            boolean rightUncategorized = right != null && right.isEmpty();
+            if (leftUncategorized != rightUncategorized) {
+                return leftUncategorized ? 1 : -1;
+            }
+            long leftCount = categoryCounts.getOrDefault(left, 0L);
+            long rightCount = categoryCounts.getOrDefault(right, 0L);
+            int countCompare = Long.compare(rightCount, leftCount);
+            if (countCompare != 0) {
+                return countCompare;
+            }
+            return categoryDisplayName(left).compareToIgnoreCase(categoryDisplayName(right));
+        });
+
+        categoryButtons.clear();
+        refreshCategoryOptions(categoryNames);
+        if (categoryNames.isEmpty()) {
+            Label placeholder = new Label("还没有分类");
+            placeholder.getStyleClass().add("category-placeholder");
+            categoryListBox.getChildren().setAll(placeholder);
+            updateCategoryActionState();
+            return;
+        }
+
+        List<Node> items = new java.util.ArrayList<>();
+        for (String categoryName : categoryNames) {
+            Label countLabel = new Label(Long.toString(categoryCounts.getOrDefault(categoryName, 0L)));
+            countLabel.getStyleClass().add("nav-count-badge");
+            Button button = new Button();
+            button.setMaxWidth(Double.MAX_VALUE);
+            button.getStyleClass().addAll("nav-button", "category-button");
+            button.setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
+            button.setGraphic(buildNavButtonGraphic(categoryDisplayName(categoryName), countLabel));
+            button.setOnAction(event -> {
+                setCurrentCategory(categoryName);
+                refreshNotes();
+            });
+            categoryButtons.put(categoryName, button);
+            items.add(button);
+        }
+        categoryListBox.getChildren().setAll(items);
+        updateCategorySelection();
+    }
+
+    private void refreshCategoryOptions() {
+        refreshCategoryOptions(configRepository.categoryCatalog());
+    }
+
+    private void refreshCategoryOptions(List<String> categoryNames) {
+        String editorValue = categoryBox.getEditor().getText();
+        categoryBox.getItems().setAll(categoryNames.stream()
+                .filter(name -> name != null && !name.isEmpty())
+                .toList());
+        if (selectedNote != null) {
+            applyCategoryEditorValue(selectedNote.getCategoryName());
+            return;
+        }
+        categoryBox.getSelectionModel().clearSelection();
+        categoryBox.getEditor().setText(editorValue == null ? "" : editorValue);
+    }
+
+    private void applyCategoryEditorValue(String categoryName) {
+        String normalized = normalizeCategoryName(categoryName);
+        if (normalized == null || normalized.isEmpty()) {
+            categoryBox.getSelectionModel().clearSelection();
+            categoryBox.getEditor().clear();
+            return;
+        }
+        if (!categoryBox.getItems().contains(normalized)) {
+            categoryBox.getItems().add(normalized);
+        }
+        categoryBox.getSelectionModel().select(normalized);
+        categoryBox.getEditor().setText(normalized);
     }
 
     private void updateNavigationCount(NoteFilter filter) {
@@ -1079,6 +1373,7 @@ public class MainView {
     }
 
     private void markLocalFailure(Note note, String action, RuntimeException ex) {
+        LOGGER.log(Level.WARNING, action + "失败", ex);
         localFailureNoteUuid = note == null ? null : note.getNoteUuid();
         lastLocalFailureMessage = action + "失败: " + normalizeErrorMessage(ex, action + "失败");
         saveStatusLabel.setText(lastLocalFailureMessage);
@@ -1115,13 +1410,16 @@ public class MainView {
         if (content == null || content.isBlank()) {
             return editorDocument("");
         }
+        content = HtmlContentSanitizer.normalizeForStorage(content);
+        if (content.isBlank()) {
+            return editorDocument("");
+        }
         String trimmed = content.stripLeading();
         String lowerTrimmed = trimmed.toLowerCase();
         if (lowerTrimmed.startsWith("<html") || lowerTrimmed.startsWith("<!doctype")) {
             return injectEditorStyle(content);
         }
-        if (lowerTrimmed.startsWith("<body") || lowerTrimmed.startsWith("<p")
-                || lowerTrimmed.startsWith("<div") || lowerTrimmed.startsWith("<h")) {
+        if (HtmlContentSanitizer.looksLikeHtmlMarkup(trimmed)) {
             return editorDocument(content);
         }
         return editorDocument(escapeHtml(content).replace("\n", "<br>"));
@@ -1180,6 +1478,14 @@ public class MainView {
                 && note.getTitle().contains(CONFLICT_COPY_MARKER);
     }
 
+    private String displayTitle(Note note) {
+        String title = note == null || note.getTitle() == null ? "" : note.getTitle().strip();
+        if (!isConflictCopy(note)) {
+            return title;
+        }
+        return title.replaceFirst("（冲突副本\\s+[^）]+）$", "").strip();
+    }
+
     private class NoteCardCell extends ListCell<Note> {
 
         @Override
@@ -1191,7 +1497,7 @@ public class MainView {
                 return;
             }
 
-            TextFlow title = highlightText(note.getTitle(), searchField.getText(), "card-title");
+            TextFlow title = highlightText(displayTitle(note), searchField.getText(), "card-title");
             title.setMaxWidth(Double.MAX_VALUE);
 
             TextFlow summary = highlightText(summaryText(note), searchField.getText(), "card-summary");
@@ -1227,7 +1533,9 @@ public class MainView {
             String category = note.getCategoryName() == null || note.getCategoryName().isBlank()
                     ? "未分类"
                     : note.getCategoryName();
-            String marker = (note.isPinned() ? "置顶 " : "") + (note.isFavorite() ? "收藏 " : "");
+            String marker = (isConflictCopy(note) ? "冲突副本 " : "")
+                    + (note.isPinned() ? "置顶 " : "")
+                    + (note.isFavorite() ? "收藏 " : "");
             return marker + category + "  " + note.getUpdateTime();
         }
 

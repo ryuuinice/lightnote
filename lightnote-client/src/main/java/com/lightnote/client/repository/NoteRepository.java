@@ -6,6 +6,7 @@ import com.lightnote.client.model.SyncStatus;
 import com.lightnote.client.remote.RemoteNote;
 import com.lightnote.client.remote.SyncConflictItem;
 import com.lightnote.client.remote.SyncItemResult;
+import com.lightnote.client.util.HtmlContentSanitizer;
 import com.lightnote.client.util.HtmlTextExtractor;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -23,7 +24,8 @@ import java.util.UUID;
 public class NoteRepository {
 
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
-    private static final String CONFLICT_COPY_MARKER = " - 冲突副本 - ";
+    private static final DateTimeFormatter CONFLICT_COPY_TITLE_TIME_FORMATTER = DateTimeFormatter.ofPattern("MM-dd HH:mm");
+    private static final String CONFLICT_COPY_MARKER = "冲突副本";
 
     private final Path databasePath;
 
@@ -46,13 +48,19 @@ public class NoteRepository {
     }
 
     public List<Note> listByFilter(String query, NoteFilter filter) {
+        return listByFilter(query, filter, null);
+    }
+
+    public List<Note> listByFilter(String query, NoteFilter filter, String categoryName) {
         NoteFilter safeFilter = filter == null ? NoteFilter.ALL : filter;
-        if (safeFilter == NoteFilter.ALL) {
+        boolean categoryFilterActive = categoryName != null;
+        String normalizedCategory = categoryFilterActive ? normalizeCategoryName(categoryName) : null;
+        if (safeFilter == NoteFilter.ALL && !categoryFilterActive) {
             return listActive(query);
         }
 
         String normalized = query == null ? "" : query.trim();
-        String where = whereClauseForFilter(safeFilter);
+        String where = buildWhereClause(safeFilter, normalizedCategory);
 
         if (normalized.isEmpty()) {
             return queryNotes("""
@@ -60,7 +68,7 @@ public class NoteRepository {
                     FROM notes
                     WHERE %s
                     ORDER BY is_pinned DESC, update_time DESC
-                    """.formatted(where));
+                    """.formatted(where), List.of());
         }
         return searchLikeWithWhere(normalized, where);
     }
@@ -69,7 +77,7 @@ public class NoteRepository {
         NoteFilter safeFilter = filter == null ? NoteFilter.ALL : filter;
         String where = safeFilter == NoteFilter.ALL
                 ? "is_deleted = 0 AND is_archived = 0"
-                : whereClauseForFilter(safeFilter);
+                : buildWhereClause(safeFilter, "");
         String sql = "SELECT COUNT(*) FROM notes WHERE " + where;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql);
@@ -77,6 +85,57 @@ public class NoteRepository {
             return resultSet.next() ? resultSet.getLong(1) : 0;
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to count notes for filter " + safeFilter, ex);
+        }
+    }
+
+    public List<CategorySummary> listCategorySummaries() {
+        String sql = """
+                SELECT
+                    COALESCE(NULLIF(TRIM(category_name), ''), '') AS normalized_category_name,
+                    COUNT(*) AS note_count
+                FROM notes
+                WHERE is_deleted = 0
+                  AND is_archived = 0
+                GROUP BY normalized_category_name
+                ORDER BY
+                    CASE WHEN normalized_category_name = '' THEN 1 ELSE 0 END,
+                    note_count DESC,
+                    normalized_category_name COLLATE NOCASE ASC
+                """;
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            List<CategorySummary> categories = new ArrayList<>();
+            while (resultSet.next()) {
+                categories.add(new CategorySummary(
+                        resultSet.getString("normalized_category_name"),
+                        resultSet.getLong("note_count")
+                ));
+            }
+            return categories;
+        } catch (SQLException ex) {
+            throw new IllegalStateException("Failed to list categories", ex);
+        }
+    }
+
+    public void renameCategory(String previousName, String nextName) {
+        String previous = normalizeCategoryName(previousName);
+        String next = normalizeCategoryName(nextName);
+        if (previous.isEmpty() || next.isEmpty() || previous.equals(next)) {
+            return;
+        }
+        String sql = """
+                UPDATE notes
+                SET category_name = ?
+                WHERE COALESCE(NULLIF(TRIM(category_name), ''), '') = ?
+                """;
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, next);
+            statement.setString(2, previous);
+            statement.executeUpdate();
+        } catch (SQLException ex) {
+            throw new IllegalStateException("Failed to rename category", ex);
         }
     }
 
@@ -124,8 +183,10 @@ public class NoteRepository {
         if (note.getId() == null) {
             throw new IllegalArgumentException("Cannot save note without id");
         }
+        note.setContent(normalizeStoredContent(note.getContent()));
         note.setTitle(normalizeTitle(note.getTitle(), note.getContent()));
         note.setSummary(buildSummary(note.getSummary(), note.getContent()));
+        note.setCategoryName(normalizeCategoryName(note.getCategoryName()));
         note.setUpdateTime(now());
         if (note.getSyncStatus() == SyncStatus.SYNCED) {
             note.setSyncStatus(SyncStatus.DIRTY);
@@ -263,9 +324,9 @@ public class NoteRepository {
         Note copy = new Note();
         String now = now();
         copy.setNoteUuid(UUID.randomUUID().toString());
-        copy.setTitle(local.getTitle() + CONFLICT_COPY_MARKER + now.replace(":", "").replace("-", "").replace("T", "-"));
-        copy.setContent(local.getContent());
-        copy.setSummary(local.getSummary());
+        copy.setTitle(buildConflictCopyTitle(local.getTitle(), now));
+        copy.setContent(normalizeStoredContent(local.getContent()));
+        copy.setSummary(buildSummary(local.getSummary(), copy.getContent()));
         copy.setCategoryName(local.getCategoryName());
         copy.setPinned(local.isPinned());
         copy.setFavorite(local.isFavorite());
@@ -361,10 +422,11 @@ public class NoteRepository {
                 """;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
+            String content = normalizeStoredContent(remote.content());
             statement.setString(1, remote.title());
-            statement.setString(2, remote.content());
-            statement.setString(3, remote.summary());
-            statement.setString(4, remote.categoryName());
+            statement.setString(2, content);
+            statement.setString(3, buildSummary(remote.summary(), content));
+            statement.setString(4, normalizeCategoryName(remote.categoryName()));
             statement.setInt(5, remote.pinned() ? 1 : 0);
             statement.setInt(6, remote.favorite() ? 1 : 0);
             statement.setInt(7, remote.archived() ? 1 : 0);
@@ -386,9 +448,9 @@ public class NoteRepository {
         Note note = new Note();
         note.setNoteUuid(remote.noteUuid());
         note.setTitle(remote.title());
-        note.setContent(remote.content());
-        note.setSummary(remote.summary());
-        note.setCategoryName(remote.categoryName());
+        note.setContent(normalizeStoredContent(remote.content()));
+        note.setSummary(buildSummary(remote.summary(), note.getContent()));
+        note.setCategoryName(normalizeCategoryName(remote.categoryName()));
         note.setPinned(remote.pinned());
         note.setFavorite(remote.favorite());
         note.setArchived(remote.archived());
@@ -428,8 +490,8 @@ public class NoteRepository {
         return searchLikeWithWhere(query, "is_deleted = 0 AND is_archived = 0");
     }
 
-    private String whereClauseForFilter(NoteFilter filter) {
-        return switch (filter) {
+    private String buildWhereClause(NoteFilter filter, String categoryName) {
+        String baseWhere = switch (filter) {
             case TODAY -> "is_deleted = 0 AND is_archived = 0 AND substr(update_time, 1, 10) = date('now', 'localtime')";
             case RECENT_7_DAYS -> "is_deleted = 0 AND is_archived = 0 AND substr(update_time, 1, 10) >= date('now', '-7 days', 'localtime')";
             case FAVORITES -> "is_deleted = 0 AND is_archived = 0 AND is_favorite = 1";
@@ -437,6 +499,17 @@ public class NoteRepository {
             case CONFLICT_COPIES -> "is_deleted = 0 AND title LIKE '%" + CONFLICT_COPY_MARKER + "%'";
             case ALL -> "is_deleted = 0 AND is_archived = 0";
         };
+        if (categoryName == null) {
+            return baseWhere;
+        }
+        String normalizedCategory = normalizeCategoryName(categoryName);
+        return baseWhere + " AND COALESCE(NULLIF(TRIM(category_name), ''), '') = " + quoteSql(normalizedCategory);
+    }
+
+    private String buildConflictCopyTitle(String title, String now) {
+        String baseTitle = title == null || title.isBlank() ? "未命名笔记" : title.strip();
+        LocalDateTime parsedTime = LocalDateTime.parse(now, FORMATTER);
+        return baseTitle + "（冲突副本 " + parsedTime.format(CONFLICT_COPY_TITLE_TIME_FORMATTER) + "）";
     }
 
     private List<Note> searchLikeWithWhere(String query, String where) {
@@ -461,14 +534,33 @@ public class NoteRepository {
         }
     }
 
-    private List<Note> queryNotes(String sql) {
+    private List<Note> queryNotes(String sql, List<String> parameters) {
         try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql);
-             ResultSet resultSet = statement.executeQuery()) {
-            return readNotes(resultSet);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (int index = 0; index < parameters.size(); index++) {
+                statement.setString(index + 1, parameters.get(index));
+            }
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return readNotes(resultSet);
+            }
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to query notes", ex);
         }
+    }
+
+    private List<Note> queryNotes(String sql) {
+        return queryNotes(sql, List.of());
+    }
+
+    private String normalizeCategoryName(String categoryName) {
+        return categoryName == null ? "" : categoryName.strip();
+    }
+
+    private String quoteSql(String value) {
+        return "'" + value.replace("'", "''") + "'";
+    }
+
+    public record CategorySummary(String name, long count) {
     }
 
     private List<Note> readNotes(ResultSet resultSet) throws SQLException {
@@ -478,8 +570,8 @@ public class NoteRepository {
             note.setId(resultSet.getLong("id"));
             note.setNoteUuid(resultSet.getString("note_uuid"));
             note.setTitle(resultSet.getString("title"));
-            note.setContent(resultSet.getString("content"));
-            note.setSummary(resultSet.getString("summary"));
+            note.setContent(normalizeStoredContent(resultSet.getString("content")));
+            note.setSummary(buildSummary(resultSet.getString("summary"), note.getContent()));
             note.setCategoryName(resultSet.getString("category_name"));
             note.setPinned(resultSet.getInt("is_pinned") == 1);
             note.setFavorite(resultSet.getInt("is_favorite") == 1);
@@ -538,6 +630,10 @@ public class NoteRepository {
 
     private String stripHtml(String value) {
         return HtmlTextExtractor.toPlainText(value);
+    }
+
+    private String normalizeStoredContent(String value) {
+        return HtmlContentSanitizer.normalizeForStorage(value);
     }
 
     private String escapeFtsQuery(String query) {

@@ -2,23 +2,30 @@ package com.lightnote.client.repository;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 
 import com.lightnote.client.model.Note;
 import com.lightnote.client.model.NoteFilter;
 import com.lightnote.client.model.SyncStatus;
+import com.lightnote.client.repository.NoteRepository.CategorySummary;
 import com.lightnote.client.remote.RemoteNote;
 import com.lightnote.client.remote.SyncConflictItem;
 import com.lightnote.client.remote.SyncItemResult;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.regex.Pattern;
 import java.util.Comparator;
 import java.util.List;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class NoteRepositorySyncTest {
+
+    private static final Pattern CONFLICT_COPY_TITLE_PATTERN =
+            Pattern.compile(".+（冲突副本 \\d{2}-\\d{2} \\d{2}:\\d{2}）");
 
     private Path tempDir;
     private DatabaseInitializer initializer;
@@ -57,6 +64,11 @@ class NoteRepositorySyncTest {
         repository.save(note);
         String pushedUpdateTime = note.getUpdateTime();
 
+        try {
+            Thread.sleep(2);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        }
         note.setContent("<p>latest local edit</p>");
         repository.save(note);
 
@@ -237,5 +249,126 @@ class NoteRepositorySyncTest {
         assertEquals(1L, repository.countByFilter(NoteFilter.FAVORITES));
         assertEquals(1L, repository.countByFilter(NoteFilter.ARCHIVED));
         assertEquals(1L, repository.countByFilter(NoteFilter.CONFLICT_COPIES));
+    }
+
+    @Test
+    void createConflictCopyUsesReadableTitleFormat() {
+        Note source = repository.createEmpty();
+        source.setTitle("Deploy Guide");
+        repository.save(source);
+
+        Note conflictCopy = repository.createConflictCopy(repository.findByUuid(source.getNoteUuid()));
+
+        assertNotNull(conflictCopy);
+        assertEquals(true, CONFLICT_COPY_TITLE_PATTERN.matcher(conflictCopy.getTitle()).matches());
+    }
+
+    @Test
+    void listByFilterSupportsCategoryFilterIncludingUncategorized() {
+        Note ops = repository.createEmpty();
+        ops.setTitle("Ops");
+        ops.setCategoryName("  运维  ");
+        repository.save(ops);
+
+        Note dev = repository.createEmpty();
+        dev.setTitle("Dev");
+        dev.setCategoryName("研发");
+        repository.save(dev);
+
+        Note uncategorized = repository.createEmpty();
+        uncategorized.setTitle("Inbox");
+        repository.save(uncategorized);
+
+        List<String> opsTitles = repository.listByFilter("", NoteFilter.ALL, "运维").stream()
+                .map(Note::getTitle)
+                .collect(Collectors.toList());
+        List<String> uncategorizedTitles = repository.listByFilter("", NoteFilter.ALL, "").stream()
+                .map(Note::getTitle)
+                .collect(Collectors.toList());
+
+        assertIterableEquals(List.of("Ops"), opsTitles);
+        assertIterableEquals(List.of("Inbox"), uncategorizedTitles);
+    }
+
+    @Test
+    void listCategorySummariesReturnsNormalizedCounts() {
+        Note first = repository.createEmpty();
+        first.setTitle("First");
+        first.setCategoryName(" 运维 ");
+        repository.save(first);
+
+        Note second = repository.createEmpty();
+        second.setTitle("Second");
+        second.setCategoryName("运维");
+        repository.save(second);
+
+        Note uncategorized = repository.createEmpty();
+        uncategorized.setTitle("Inbox");
+        repository.save(uncategorized);
+
+        List<CategorySummary> summaries = repository.listCategorySummaries();
+
+        assertEquals(2, summaries.size());
+        assertEquals("运维", summaries.get(0).name());
+        assertEquals(2L, summaries.get(0).count());
+        assertEquals("", summaries.get(1).name());
+        assertEquals(1L, summaries.get(1).count());
+    }
+
+    @Test
+    void renameCategoryUpdatesExistingNotes() {
+        Note note = repository.createEmpty();
+        note.setTitle("Ops");
+        note.setCategoryName("运维");
+        repository.save(note);
+
+        repository.renameCategory("运维", "平台");
+
+        Note stored = repository.findByUuid(note.getNoteUuid());
+        assertNotNull(stored);
+        assertEquals("平台", stored.getCategoryName());
+        assertEquals(1, repository.listByFilter("", NoteFilter.ALL, "平台").size());
+    }
+
+    @Test
+    void applyRemoteDecodesEscapedHtmlContent() {
+        Note note = repository.createEmpty();
+
+        repository.applyRemote(new RemoteNote(
+                note.getNoteUuid(),
+                "UPDATE",
+                2L,
+                8L,
+                "Remote",
+                "&amp;lt;span style=\"font-weight: bold\"&amp;gt;Hello&amp;lt;/span&amp;gt;",
+                "Hello",
+                "",
+                false,
+                false,
+                false,
+                false,
+                "2026-05-08T10:00:00",
+                "2026-05-08T10:20:00",
+                null
+        ));
+
+        Note updated = repository.findByUuid(note.getNoteUuid());
+        assertNotNull(updated);
+        assertEquals("<span style=\"font-weight: bold\">Hello</span>", updated.getContent());
+    }
+
+    @Test
+    void saveNormalizesEscapedHtmlBeforeSyncReadsIt() {
+        Note note = repository.createEmpty();
+        note.setTitle("Rich");
+        note.setContent("&lt;html&gt;&lt;body&gt;&lt;span style=\"font-weight: bold\"&gt;Hello&lt;/span&gt;&lt;/body&gt;&lt;/html&gt;");
+
+        repository.save(note);
+
+        Note stored = repository.findByUuid(note.getNoteUuid());
+        assertNotNull(stored);
+        assertEquals("<span style=\"font-weight: bold\">Hello</span>", stored.getContent());
+        assertEquals("Hello", stored.getSummary());
+        assertEquals("<span style=\"font-weight: bold\">Hello</span>", repository.listPendingSync().get(0).getContent());
     }
 }

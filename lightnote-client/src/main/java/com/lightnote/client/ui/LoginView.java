@@ -74,7 +74,7 @@ public class LoginView {
                 syncService.login(serverUrlField.getText(), usernameField.getText(), passwordField.getText());
                 Platform.runLater(onLoginSuccess);
             } catch (Exception ex) {
-                Platform.runLater(() -> setBusy(false, "登录失败: " + ex.getMessage()));
+                Platform.runLater(() -> setBusy(false, loginFailureMessage(ex)));
             }
         }, "lightnote-login");
         thread.setDaemon(true);
@@ -84,5 +84,18 @@ public class LoginView {
     private void setBusy(boolean busy, String message) {
         loginButton.setDisable(busy);
         messageLabel.setText(message);
+    }
+
+    private String loginFailureMessage(Exception ex) {
+        String message = ex == null || ex.getMessage() == null || ex.getMessage().isBlank()
+                ? "登录失败，请检查服务端地址和账号信息"
+                : ex.getMessage();
+        return switch (message) {
+            case "无法连接到服务端" -> "登录失败：无法连接到服务端，请检查地址和服务是否启动";
+            case "无法解析服务端地址" -> "登录失败：服务端地址无法解析，请检查域名或 IP";
+            case "连接服务端超时" -> "登录失败：连接服务端超时，请稍后重试";
+            case "服务端地址格式不正确" -> "登录失败：服务端地址格式不正确";
+            default -> "登录失败: " + message;
+        };
     }
 }

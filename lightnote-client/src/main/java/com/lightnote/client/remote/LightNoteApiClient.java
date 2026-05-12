@@ -4,11 +4,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lightnote.client.model.Note;
 import com.lightnote.client.model.SyncStatus;
+import com.lightnote.client.util.HtmlContentSanitizer;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -56,7 +60,7 @@ public class LightNoteApiClient {
         item.put("operation", note.getSyncStatus() == SyncStatus.DELETE_PENDING ? "DELETE" : note.getObjectVersion() == 0 ? "CREATE" : "UPDATE");
         item.put("baseObjectVersion", note.getObjectVersion());
         item.put("title", note.getTitle());
-        item.put("content", note.getContent());
+        item.put("content", HtmlContentSanitizer.normalizeForStorage(note.getContent()));
         item.put("summary", note.getSummary());
         item.put("categoryName", note.getCategoryName());
         item.put("pinned", note.isPinned());
@@ -128,8 +132,12 @@ public class LightNoteApiClient {
                 throw new ApiException(root.path("message").asText("HTTP " + response.statusCode()));
             }
             return root.path("data");
+        } catch (IllegalArgumentException ex) {
+            throw new ApiException("服务端地址格式不正确", ex);
+        } catch (HttpTimeoutException ex) {
+            throw new ApiException("连接服务端超时", ex);
         } catch (IOException ex) {
-            throw new ApiException("网络请求失败", ex);
+            throw new ApiException(networkErrorMessage(ex), ex);
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new ApiException("网络请求被中断", ex);
@@ -146,5 +154,19 @@ public class LightNoteApiClient {
             trimmed = trimmed.substring(0, trimmed.length() - 1);
         }
         return trimmed;
+    }
+
+    private String networkErrorMessage(IOException ex) {
+        if (ex instanceof ConnectException) {
+            return "无法连接到服务端";
+        }
+        if (ex instanceof UnknownHostException) {
+            return "无法解析服务端地址";
+        }
+        String message = ex.getMessage();
+        if (message != null && message.toLowerCase().contains("timed out")) {
+            return "连接服务端超时";
+        }
+        return "网络请求失败";
     }
 }

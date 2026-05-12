@@ -11,6 +11,8 @@ public final class HtmlContentSanitizer {
 
     private static final String EDITOR_STYLE_PATTERN =
             "(?is)<style\\s+id=[\"']lightnote-editor-style[\"'][^>]*>.*?</style>";
+    private static final Pattern HTML_TAG_PATTERN =
+            Pattern.compile("(?is)<\\s*/?\\s*(html|head|body|p|div|span|br|ol|ul|li|h[1-6]|strong|em|b|i|u|s|blockquote|pre|code|a|img|table|thead|tbody|tr|td|th)\\b");
     private static final Pattern STYLE_ATTRIBUTE_PATTERN =
             Pattern.compile("(?i)\\sstyle=(['\"])(.*?)\\1");
     private static final Set<String> ALLOWED_STYLE_PROPERTIES = Set.of(
@@ -64,6 +66,32 @@ public final class HtmlContentSanitizer {
                 .trim();
     }
 
+    public static String normalizeForStorage(String value) {
+        return sanitizeForStorage(decodeEscapedMarkupIfNeeded(value));
+    }
+
+    public static String decodeEscapedMarkupIfNeeded(String value) {
+        if (value == null || value.isBlank() || looksLikeHtmlMarkup(value)) {
+            return value;
+        }
+        String current = value;
+        for (int i = 0; i < 4; i++) {
+            String decoded = decodeHtmlEntities(current);
+            if (decoded.equals(current)) {
+                break;
+            }
+            current = decoded;
+            if (looksLikeHtmlMarkup(current)) {
+                return current;
+            }
+        }
+        return value;
+    }
+
+    public static boolean looksLikeHtmlMarkup(String value) {
+        return value != null && HTML_TAG_PATTERN.matcher(value).find();
+    }
+
     private static String sanitizeStyleAttributes(String html) {
         Matcher matcher = STYLE_ATTRIBUTE_PATTERN.matcher(html);
         StringBuffer buffer = new StringBuffer();
@@ -113,5 +141,16 @@ public final class HtmlContentSanitizer {
             return html.substring(bodyOpenEnd + 1);
         }
         return html.substring(bodyOpenEnd + 1, bodyEnd);
+    }
+
+    private static String decodeHtmlEntities(String value) {
+        return value
+                .replace("&nbsp;", " ")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&apos;", "'")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&");
     }
 }

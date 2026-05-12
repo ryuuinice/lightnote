@@ -60,7 +60,8 @@
 
 .search-field,
 .title-field,
-.category-field {
+.category-field,
+.category-field > .text-field {
     -fx-background-color: #ffffff;
     -fx-text-fill: #1f2937;
     -fx-prompt-text-fill: #a8b3c2;
@@ -95,6 +96,21 @@
 .category-field {
     -fx-background-color: #f8fafd;
     -fx-padding: 6 10;
+}
+
+.category-field:focused,
+.category-field > .text-field:focused {
+    -fx-border-color: #9db2ff;
+    -fx-background-color: #ffffff;
+    -fx-effect: dropshadow(gaussian, rgba(90, 124, 255, 0.12), 10, 0.18, 0, 0);
+}
+
+.category-field > .arrow-button {
+    -fx-background-color: transparent;
+}
+
+.category-field > .arrow-button .arrow {
+    -fx-background-color: #738096;
 }
 
 .button {
@@ -167,6 +183,7 @@
 
 .nav-button-label {
     -fx-text-fill: #41516a;
+    -fx-wrap-text: true;
 }
 
 .nav-count-badge {
@@ -190,6 +207,9 @@
 
 .nav-button.nav-button-active {
     -fx-background-color: #e7edff;
+    -fx-border-color: transparent transparent transparent #5a7cff;
+    -fx-border-width: 0 0 0 3;
+    -fx-padding: 7 10 7 7;
 }
 
 .nav-button.nav-button-active .nav-button-label {
@@ -213,9 +233,29 @@
     -fx-background-color: #dfe8f4;
 }
 
+.category-list {
+    -fx-padding: 2 0 0 0;
+}
+
+.category-actions {
+    -fx-padding: 0 0 2 0;
+}
+
+.category-actions .button {
+    -fx-font-size: 11px;
+    -fx-padding: 5 8;
+    -fx-alignment: center-left;
+    -fx-wrap-text: true;
+    -fx-max-width: Infinity;
+}
+
 .category-placeholder {
     -fx-text-fill: #7d899b;
     -fx-padding: 4 10 0 10;
+}
+
+.category-button {
+    -fx-padding: 6 10;
 }
 
 .note-list {
@@ -406,10 +446,29 @@
     -fx-text-fill: #3867d6;
 }
 
+.rich-editor .combo-box-base:focused,
+.rich-editor .color-picker:focused,
+.rich-editor .toggle-button:focused,
+.rich-editor .button:focused {
+    -fx-background-color: #eef3ff;
+    -fx-border-color: #a7baff;
+    -fx-border-width: 1;
+}
+
 .rich-editor .combo-box .list-cell,
 .rich-editor .combo-box .text {
     -fx-text-fill: #52627a;
     -fx-font-size: 12px;
+}
+
+.rich-editor .combo-box-base .arrow-button,
+.rich-editor .color-picker .arrow-button {
+    -fx-background-color: transparent;
+}
+
+.rich-editor .combo-box-base .arrow,
+.rich-editor .color-picker .arrow {
+    -fx-background-color: #708098;
 }
 
 .rich-editor .combo-box.editor-font-family {
@@ -430,6 +489,40 @@
 .rich-editor .button .text,
 .rich-editor .toggle-button .text {
     -fx-font-size: 12px;
+}
+
+.rich-editor .combo-box-popup .list-view,
+.combo-box-popup .list-view {
+    -fx-background-color: #ffffff;
+    -fx-border-color: #dce3ee;
+    -fx-border-radius: 8;
+    -fx-background-radius: 8;
+    -fx-effect: dropshadow(gaussian, rgba(44, 62, 89, 0.14), 14, 0.18, 0, 4);
+}
+
+.rich-editor .combo-box-popup .list-cell,
+.combo-box-popup .list-cell {
+    -fx-text-fill: #41516a;
+    -fx-background-color: transparent;
+    -fx-padding: 7 10;
+}
+
+.rich-editor .combo-box-popup .list-cell:hover,
+.combo-box-popup .list-cell:hover {
+    -fx-background-color: #eef3fb;
+}
+
+.rich-editor .combo-box-popup .list-cell:selected,
+.combo-box-popup .list-cell:selected {
+    -fx-background-color: #e7edff;
+    -fx-text-fill: #2f5ad8;
+}
+
+.rich-editor .color-picker .color-rect {
+    -fx-stroke: #cfd8e6;
+    -fx-stroke-width: 1;
+    -fx-arc-width: 6;
+    -fx-arc-height: 6;
 }
 
 .rich-editor .web-view {
@@ -457,6 +550,9 @@
 .scroll-bar .thumb {
     -fx-background-color: #d6deea;
     -fx-background-radius: 8;
+    -fx-border-color: rgba(255, 255, 255, 0.8);
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
 }
 
 .scroll-bar .thumb:hover,
@@ -497,6 +593,7 @@
 
 .check-box:hover .box {
     -fx-border-color: #8ea2ff;
+    -fx-background-color: #f9fbff;
 }
 
 .check-box:selected .box {

@@ -120,6 +120,43 @@ class LightNoteApiClientTest {
     }
 
     @Test
+    void pushNormalizesEscapedHtmlBeforeSending() throws Exception {
+        AtomicReference<String> body = new AtomicReference<>();
+        server = startServer(exchange -> {
+            body.set(readBody(exchange));
+            writeJson(exchange, 200, """
+                    {
+                      "code": 0,
+                      "message": "success",
+                      "data": {
+                        "serverVersion": 9,
+                        "successItems": [
+                          {"noteUuid":"note-rich","objectVersion":1,"serverVersion":9}
+                        ],
+                        "conflictItems": []
+                      }
+                    }
+                    """);
+        });
+
+        Note note = new Note();
+        note.setNoteUuid("note-rich");
+        note.setTitle("Rich");
+        note.setContent("&lt;html&gt;&lt;body&gt;&lt;span style=\"font-weight: bold\"&gt;Hello&lt;/span&gt;&lt;/body&gt;&lt;/html&gt;");
+        note.setSummary("Hello");
+        note.setSyncStatus(SyncStatus.DIRTY);
+        note.setUpdateTime("2026-05-08T11:00:00");
+
+        LightNoteApiClient client = new LightNoteApiClient(baseUrl());
+        client.push("jwt-rich", 8L, List.of(note));
+
+        assertNotNull(body.get());
+        assertTrue(body.get().contains("<span style=\\\"font-weight: bold\\\">Hello</span>"));
+        assertFalse(body.get().contains("&lt;html"));
+        assertFalse(body.get().contains("<html"));
+    }
+
+    @Test
     void changesParsesNotesAndSurfacesApiErrors() throws Exception {
         AtomicReference<String> query = new AtomicReference<>();
         server = startServer(exchange -> {
@@ -177,6 +214,15 @@ class LightNoteApiClientTest {
                 """));
         ApiException ex = assertThrows(ApiException.class, () -> client.changes("jwt-3", 12L, 50));
         assertEquals("token invalid", ex.getMessage());
+    }
+
+    @Test
+    void loginRejectsInvalidServerUrlWithFriendlyMessage() {
+        LightNoteApiClient client = new LightNoteApiClient("http://127.0.0.1:8080 bad");
+
+        ApiException ex = assertThrows(ApiException.class, () -> client.login("admin", "secret"));
+
+        assertEquals("服务端地址格式不正确", ex.getMessage());
     }
 
     private HttpServer startServer(ExchangeHandler handler) throws Exception {

@@ -796,6 +796,10 @@ public class MainView {
         if (loadingSelection || selectedNote == null) {
             return;
         }
+        if (!hasPendingEditorChanges()) {
+            updateWordCount();
+            return;
+        }
         breadcrumbLabel.setText(contextLabel() + " / " + titleField.getText());
         saveStatusLabel.setText("正在输入...");
         updateSyncLamp(selectedNote);
@@ -825,6 +829,17 @@ public class MainView {
         boolean pinnedChanged = selectedNote.isPinned() != pinnedBox.isSelected();
         boolean favoriteChanged = selectedNote.isFavorite() != favoriteBox.isSelected();
         boolean archivedChanged = selectedNote.isArchived() != archivedBox.isSelected();
+        boolean hasChanges = titleChanged
+                || categoryChanged
+                || contentChanged
+                || pinnedChanged
+                || favoriteChanged
+                || archivedChanged;
+        if (!hasChanges) {
+            clearLocalFailure();
+            updateEditorStatus("已保存到本地");
+            return true;
+        }
         selectedNote.setTitle(titleField.getText());
         selectedNote.setCategoryName(categoryBox.getEditor().getText());
         selectedNote.setContent(convertHtmlToMarkdown || selectedNote.getContentFormat() == ContentFormat.MARKDOWN
@@ -871,6 +886,27 @@ public class MainView {
         }
         autosaveDelay.stop();
         saveSelectedNote();
+    }
+
+    private boolean hasPendingEditorChanges() {
+        if (selectedNote == null) {
+            return false;
+        }
+        boolean titleChanged = !nullToEmpty(selectedNote.getTitle()).equals(nullToEmpty(titleField.getText()));
+        boolean categoryChanged = !nullToEmpty(normalizeCategoryName(selectedNote.getCategoryName()))
+                .equals(nullToEmpty(normalizeCategoryName(categoryBox.getEditor().getText())));
+        String originalContent = selectedNote.getContent();
+        String displayedContent = editorTextForNote(selectedNote);
+        String editorContent = editorContentForSave(selectedNote);
+        boolean contentChanged = selectedNote.getContentFormat() == ContentFormat.HTML
+                ? !nullToEmpty(displayedContent).equals(nullToEmpty(editorContent))
+                : !nullToEmpty(originalContent).equals(nullToEmpty(editorContent));
+        return titleChanged
+                || categoryChanged
+                || contentChanged
+                || selectedNote.isPinned() != pinnedBox.isSelected()
+                || selectedNote.isFavorite() != favoriteBox.isSelected()
+                || selectedNote.isArchived() != archivedBox.isSelected();
     }
 
     private String editorContentForSave(Note note) {

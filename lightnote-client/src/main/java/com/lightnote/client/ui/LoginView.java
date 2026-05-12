@@ -12,6 +12,9 @@ import javafx.scene.control.PasswordField;
 import javafx.scene.control.TextField;
 import javafx.scene.layout.VBox;
 
+/**
+ * 登录界面，负责服务端地址、账号密码输入与登录结果反馈。
+ */
 public class LoginView {
 
     private final VBox root = new VBox(12);
@@ -99,3 +102,4 @@ public class LoginView {
         };
     }
 }
+

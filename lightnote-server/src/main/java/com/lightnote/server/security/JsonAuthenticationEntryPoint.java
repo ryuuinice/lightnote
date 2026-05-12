@@ -11,6 +11,9 @@ import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.stereotype.Component;
 
 @Component
+/**
+ * 未认证入口处理器，负责将 401 场景输出为统一 JSON 响应。
+ */
 public class JsonAuthenticationEntryPoint implements AuthenticationEntryPoint {
 
     private final ObjectMapper objectMapper;
@@ -31,3 +34,4 @@ public class JsonAuthenticationEntryPoint implements AuthenticationEntryPoint {
         objectMapper.writeValue(response.getWriter(), ApiResponse.error(401, "unauthorized"));
     }
 }
+

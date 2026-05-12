@@ -8,63 +8,48 @@ import com.lightnote.client.repository.NoteRepository;
 import com.lightnote.client.repository.NoteRepository.CategorySummary;
 import com.lightnote.client.sync.ClientSyncService;
 import com.lightnote.client.util.AppLogger;
+import com.lightnote.client.util.HtmlToMarkdownConverter;
 import com.lightnote.client.util.HtmlTextExtractor;
 import com.lightnote.client.util.MarkdownRenderer;
 import com.lightnote.client.util.MarkdownTextExtractor;
-import javafx.application.Platform;
-import java.util.EnumMap;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 import javafx.animation.PauseTransition;
+import javafx.application.Platform;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
-import javafx.scene.Parent;
-import javafx.scene.control.Button;
-import javafx.scene.control.CheckBox;
-import javafx.scene.control.ComboBox;
-import javafx.scene.control.ContentDisplay;
-import javafx.scene.control.Dialog;
-import javafx.scene.control.Label;
-import javafx.scene.control.ListCell;
-import javafx.scene.control.ListView;
-import javafx.scene.control.Separator;
-import javafx.scene.control.SplitPane;
-import javafx.scene.control.TextArea;
-import javafx.scene.control.TextField;
-import javafx.scene.control.TextInputDialog;
-import javafx.scene.control.Tooltip;
 import javafx.scene.Node;
-import javafx.scene.layout.BorderPane;
-import javafx.scene.layout.HBox;
-import javafx.scene.layout.Priority;
-import javafx.scene.layout.Region;
-import javafx.scene.layout.VBox;
-import javafx.scene.web.WebView;
+import javafx.scene.Parent;
+import javafx.scene.control.*;
+import javafx.scene.layout.*;
+import javafx.scene.shape.Rectangle;
 import javafx.scene.text.Text;
 import javafx.scene.text.TextFlow;
+import javafx.scene.web.WebView;
 import javafx.stage.Window;
 import javafx.util.Duration;
 
+import java.util.*;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * 客户端主界面，负责三栏布局、编辑交互、本地保存与同步状态联动。
+ */
 public class MainView {
 
     private static final Logger LOGGER = AppLogger.logger(MainView.class);
+    private static final double NOTE_CARD_CELL_HEIGHT = 124;
+    private static final double NOTE_CARD_HEIGHT = 116;
+    private static final double NOTE_CARD_TITLE_HEIGHT = 38;
+    private static final double NOTE_CARD_SUMMARY_HEIGHT = 34;
+    private static final DateTimeFormatter DISPLAY_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private static final String NOTE_EDITOR_DIVIDER_KEY = "note_editor_divider_position";
     private static final String CONFLICT_COPY_MARKER = "冲突副本";
     private static final String UNCATEGORIZED_LABEL = "未分类";
-
-    private enum EditorMode {
-        EDIT,
-        SPLIT,
-        PREVIEW
-    }
-
     private final NoteRepository noteRepository;
     private final AppConfigRepository configRepository;
     private final ClientSyncService syncService;
@@ -82,7 +67,10 @@ public class MainView {
     private final Button editModeButton = new Button("编辑");
     private final Button splitModeButton = new Button("分屏");
     private final Button previewModeButton = new Button("预览");
+    private final Button convertMarkdownButton = new Button("转为 Markdown");
     private final Button syncButton = new Button("同步");
+    private final Button restoreButton = new Button("恢复");
+    private final Button deleteButton = new Button("删除");
     private final CheckBox pinnedBox = new CheckBox("置顶");
     private final CheckBox favoriteBox = new CheckBox("收藏");
     private final CheckBox archivedBox = new CheckBox("归档");
@@ -90,6 +78,7 @@ public class MainView {
     private final Label saveStatusLabel = new Label("未选择笔记");
     private final Label syncStatusLabel = new Label("●");
     private final Tooltip syncStatusTooltip = new Tooltip("未同步");
+    private final Label contentFormatLabel = new Label("Markdown");
     private final Label updateTimeLabel = new Label("");
     private final Label wordCountLabel = new Label("0 字");
     private final Map<NoteFilter, Label> navigationCountLabels = new EnumMap<>(NoteFilter.class);
@@ -106,7 +95,6 @@ public class MainView {
     private final PauseTransition autoSyncDelay = new PauseTransition(Duration.millis(2500));
     private final PauseTransition manualSyncFeedbackDelay = new PauseTransition(Duration.millis(1400));
     private final SplitPane contentSplitPane = new SplitPane();
-
     private Note selectedNote;
     private boolean loadingSelection;
     private boolean suppressSelectionChange;
@@ -119,7 +107,6 @@ public class MainView {
     private NoteFilter currentFilter = NoteFilter.ALL;
     private String currentCategoryName;
     private EditorMode editorMode = EditorMode.SPLIT;
-
     public MainView(
             NoteRepository noteRepository,
             AppConfigRepository configRepository,
@@ -156,7 +143,7 @@ public class MainView {
     }
 
     private Parent buildNavigationColumn() {
-        Label avatar = new Label("LN");
+        Label avatar = new Label("LightNote");
         avatar.getStyleClass().add("avatar-badge");
 
         Label productName = new Label("LightNote");
@@ -169,6 +156,7 @@ public class MainView {
         Button today = navButton("今天", NoteFilter.TODAY, true);
         Button week = navButton("最近 7 天", NoteFilter.RECENT_7_DAYS, true);
         Button favorites = navButton("收藏", NoteFilter.FAVORITES, true);
+        Button trash = navButton("回收站", NoteFilter.TRASH, true);
         Button conflicts = navButton("冲突", NoteFilter.CONFLICT_COPIES, true);
         Button archive = navButton("归档", NoteFilter.ARCHIVED, true);
 
@@ -189,13 +177,14 @@ public class MainView {
 
         VBox sidebar = new VBox(10,
                 avatar,
-                productName,
+                //productName,
                 new Separator(),
                 navTitle,
                 allNotes,
                 today,
                 week,
                 favorites,
+                trash,
                 conflicts,
                 archive,
                 new Separator(),
@@ -204,8 +193,8 @@ public class MainView {
                 categoryListBox,
                 spacer,
                 settings);
-        sidebar.setPrefWidth(120);
-        sidebar.setMaxWidth(120);
+        sidebar.setPrefWidth(150);
+        sidebar.setMaxWidth(150);
         sidebar.setMinWidth(100);
         sidebar.setPadding(new Insets(18, 14, 18, 14));
         sidebar.getStyleClass().add("sidebar");
@@ -314,10 +303,14 @@ public class MainView {
         editModeButton.getStyleClass().add("mode-button");
         splitModeButton.getStyleClass().add("mode-button");
         previewModeButton.getStyleClass().add("mode-button");
+        convertMarkdownButton.getStyleClass().add("ghost-button");
+        convertMarkdownButton.getStyleClass().add("convert-markdown-button");
         editModeButton.setOnAction(event -> setEditorMode(EditorMode.EDIT));
         splitModeButton.setOnAction(event -> setEditorMode(EditorMode.SPLIT));
         previewModeButton.setOnAction(event -> setEditorMode(EditorMode.PREVIEW));
-        HBox editorModes = new HBox(6, editModeButton, splitModeButton, previewModeButton);
+        convertMarkdownButton.setOnAction(event -> convertSelectedNoteToMarkdown());
+        contentFormatLabel.getStyleClass().add("content-format-badge");
+        HBox editorModes = new HBox(6, editModeButton, splitModeButton, previewModeButton, contentFormatLabel, convertMarkdownButton);
         editorModes.getStyleClass().add("editor-mode-switch");
         setEditorMode(editorMode);
 
@@ -328,15 +321,16 @@ public class MainView {
         syncButton.getStyleClass().add("ghost-button");
         syncButton.setOnAction(event -> syncNow(syncButton));
 
-        Button deleteButton = new Button("删除");
         deleteButton.getStyleClass().add("danger-link-button");
         deleteButton.setOnAction(event -> deleteSelectedNote());
+        restoreButton.getStyleClass().add("ghost-button");
+        restoreButton.setOnAction(event -> restoreSelectedNote());
         syncStatusLabel.setTooltip(syncStatusTooltip);
         setSyncLamp("unsynced", "未同步");
 
         Region headerSpacer = new Region();
         HBox.setHgrow(headerSpacer, Priority.ALWAYS);
-        HBox topLine = new HBox(10, breadcrumbLabel, headerSpacer, syncStatusLabel, saveButton, syncButton, deleteButton);
+        HBox topLine = new HBox(10, breadcrumbLabel, headerSpacer, syncStatusLabel, saveButton, syncButton, restoreButton, deleteButton);
         topLine.setAlignment(Pos.CENTER_LEFT);
         topLine.getStyleClass().add("document-topline");
 
@@ -429,6 +423,7 @@ public class MainView {
             case TODAY -> "今天还没有笔记";
             case RECENT_7_DAYS -> "最近 7 天还没有笔记";
             case FAVORITES -> "还没有收藏笔记";
+            case TRASH -> "回收站还是空的";
             case ARCHIVED -> "还没有归档笔记";
             case CONFLICT_COPIES -> "目前没有冲突副本";
             case ALL -> "还没有笔记";
@@ -442,6 +437,7 @@ public class MainView {
         return switch (currentFilter) {
             case TODAY, RECENT_7_DAYS, ALL -> "点击上方“新建”，从第一条笔记开始。";
             case FAVORITES -> "把重要内容标记为收藏，它们会集中出现在这里。";
+            case TRASH -> "先删除一条笔记，它会先进入回收站，你也可以在这里恢复它。";
             case ARCHIVED -> "归档后的笔记会收纳在这里，方便后续回看。";
             case CONFLICT_COPIES -> "发生同步冲突时，保留下来的冲突副本会显示在这里。";
         };
@@ -493,6 +489,7 @@ public class MainView {
             case TODAY -> "今天";
             case RECENT_7_DAYS -> "最近 7 天";
             case FAVORITES -> "收藏";
+            case TRASH -> "回收站";
             case ARCHIVED -> "归档";
             case CONFLICT_COPIES -> "冲突";
         };
@@ -622,6 +619,9 @@ public class MainView {
         return dialog;
     }
 
+    /**
+     * 按当前筛选和搜索条件重载第二栏列表，并尽量保留当前选中笔记或编辑上下文。
+     */
     private void refreshNotes() {
         try {
             Note selected = selectedNote;
@@ -704,8 +704,9 @@ public class MainView {
             selectedNote.setSyncStatus(refreshedNote.getSyncStatus());
             selectedNote.setServerVersion(refreshedNote.getServerVersion());
             selectedNote.setUpdateTime(refreshedNote.getUpdateTime());
+            selectedNote.setTrashed(refreshedNote.isTrashed());
             selectedNote.setCategoryName(refreshedNote.getCategoryName());
-            updateTimeLabel.setText("更新 " + selectedNote.getUpdateTime());
+            updateTimeLabel.setText("更新 " + formatDisplayTime(selectedNote.getUpdateTime()));
             suppressSelectionChange = true;
             try {
                 noteList.getSelectionModel().select(refreshedNote);
@@ -719,6 +720,9 @@ public class MainView {
         }
     }
 
+    /**
+     * 创建新笔记；若当前处于某个分类上下文，则默认让新笔记落到该分类下。
+     */
     private void createNote() {
         try {
             Note note = noteRepository.createEmpty();
@@ -758,6 +762,8 @@ public class MainView {
                 pinnedBox.setSelected(false);
                 favoriteBox.setSelected(false);
                 archivedBox.setSelected(false);
+                updateContentFormatControls(null);
+                updateTrashControls(null);
                 setEditorDisabled(true);
                 updateBreadcrumb();
                 updateEditorStatus("未选择笔记");
@@ -771,6 +777,8 @@ public class MainView {
                 pinnedBox.setSelected(note.isPinned());
                 favoriteBox.setSelected(note.isFavorite());
                 archivedBox.setSelected(note.isArchived());
+                updateContentFormatControls(note);
+                updateTrashControls(note);
                 updateBreadcrumb();
                 updateEditorStatus("已打开");
             }
@@ -787,11 +795,19 @@ public class MainView {
         editModeButton.setDisable(disabled);
         splitModeButton.setDisable(disabled);
         previewModeButton.setDisable(disabled);
+        convertMarkdownButton.setDisable(disabled || selectedNote == null || selectedNote.getContentFormat() != ContentFormat.HTML);
+        restoreButton.setDisable(disabled || selectedNote == null || !selectedNote.isTrashed());
+        restoreButton.setVisible(!disabled && selectedNote != null && selectedNote.isTrashed());
+        restoreButton.setManaged(!disabled && selectedNote != null && selectedNote.isTrashed());
+        deleteButton.setDisable(disabled);
         pinnedBox.setDisable(disabled);
         favoriteBox.setDisable(disabled);
         archivedBox.setDisable(disabled);
     }
 
+    /**
+     * 用户继续输入时启动本地自动保存防抖，并同步更新预览、字数和状态灯。
+     */
     private void scheduleAutosave() {
         if (loadingSelection || selectedNote == null) {
             return;
@@ -811,6 +827,9 @@ public class MainView {
         return saveSelectedNote(true);
     }
 
+    /**
+     * 将当前编辑器内容写回选中笔记，并按变化范围决定只刷新卡片还是整列重载。
+     */
     private boolean saveSelectedNote(boolean scheduleSync) {
         if (selectedNote == null || loadingSelection) {
             return true;
@@ -920,7 +939,7 @@ public class MainView {
         if (note.getContentFormat() == ContentFormat.MARKDOWN) {
             return note.getContent();
         }
-        return HtmlTextExtractor.toPlainText(note.getContent());
+        return HtmlToMarkdownConverter.convert(note.getContent());
     }
 
     private void refreshMarkdownPreview() {
@@ -929,6 +948,108 @@ public class MainView {
             return;
         }
         previewPane.getEngine().loadContent(MarkdownRenderer.renderDocument(contentEditor.getText()));
+    }
+
+    private void updateContentFormatControls(Note note) {
+        if (note == null) {
+            contentFormatLabel.setText("未选择");
+            convertMarkdownButton.setVisible(false);
+            convertMarkdownButton.setManaged(false);
+            return;
+        }
+        ContentFormat format = note.getContentFormat();
+        contentFormatLabel.setText(format == ContentFormat.MARKDOWN ? "Markdown" : "HTML 原文");
+        boolean canConvert = format == ContentFormat.HTML;
+        convertMarkdownButton.setVisible(canConvert);
+        convertMarkdownButton.setManaged(canConvert);
+        convertMarkdownButton.setDisable(!canConvert);
+    }
+
+    /**
+     * 将当前 HTML 笔记切换为 Markdown 模式；若保存失败，则回滚格式和正文。
+     */
+    private void convertSelectedNoteToMarkdown() {
+        if (selectedNote == null || selectedNote.getContentFormat() != ContentFormat.HTML) {
+            return;
+        }
+        String originalContent = selectedNote.getContent();
+        ContentFormat originalFormat = selectedNote.getContentFormat();
+        String converted = HtmlToMarkdownConverter.convert(originalContent);
+        if (!confirmMarkdownConversion(selectedNote, converted)) {
+            return;
+        }
+        try {
+            loadingSelection = true;
+            contentEditor.setText(converted);
+            refreshMarkdownPreview();
+            selectedNote.setContentFormat(ContentFormat.MARKDOWN);
+            updateContentFormatControls(selectedNote);
+        } finally {
+            loadingSelection = false;
+        }
+        if (!saveSelectedNote()) {
+            selectedNote.setContentFormat(originalFormat);
+            selectedNote.setContent(originalContent);
+            updateContentFormatControls(selectedNote);
+            contentEditor.setText(editorTextForNote(selectedNote));
+            refreshMarkdownPreview();
+            return;
+        }
+        saveStatusLabel.setText("已转换为 Markdown");
+    }
+
+    /**
+     * 转换前展示原文本、Markdown 草稿和渲染效果，避免用户在误操作中直接覆盖旧内容。
+     */
+    private boolean confirmMarkdownConversion(Note note, String convertedMarkdown) {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("转换为 Markdown");
+        dialog.setHeaderText("确认将当前 HTML 笔记转换为 Markdown");
+        Window owner = root.getScene() == null ? null : root.getScene().getWindow();
+        if (owner != null) {
+            dialog.initOwner(owner);
+        }
+
+        Label tip = new Label("转换会保留原笔记内容，并将这条笔记标记为待同步。");
+        tip.getStyleClass().add("conversion-tip");
+
+        TextArea originalArea = new TextArea(HtmlTextExtractor.toPlainText(note.getContent()));
+        originalArea.setEditable(false);
+        originalArea.setWrapText(true);
+        originalArea.getStyleClass().add("conversion-textarea");
+
+        TextArea convertedArea = new TextArea(convertedMarkdown);
+        convertedArea.setEditable(false);
+        convertedArea.setWrapText(true);
+        convertedArea.getStyleClass().add("conversion-textarea");
+
+        WebView conversionPreview = new WebView();
+        conversionPreview.getEngine().loadContent(MarkdownRenderer.renderDocument(convertedMarkdown));
+        conversionPreview.getStyleClass().add("conversion-preview");
+
+        VBox originalBox = new VBox(6, new Label("原正文文本"), originalArea);
+        VBox convertedBox = new VBox(6, new Label("转换后的 Markdown"), convertedArea);
+        VBox previewBox = new VBox(6, new Label("Markdown 渲染效果"), conversionPreview);
+        VBox.setVgrow(originalArea, Priority.ALWAYS);
+        VBox.setVgrow(convertedArea, Priority.ALWAYS);
+        VBox.setVgrow(conversionPreview, Priority.ALWAYS);
+
+        SplitPane splitPane = new SplitPane(originalBox, convertedBox, previewBox);
+        splitPane.setDividerPositions(0.32, 0.66);
+        splitPane.getStyleClass().add("conversion-split-pane");
+
+        VBox content = new VBox(12, tip, splitPane);
+        content.setPrefWidth(1080);
+        content.setPrefHeight(640);
+        content.getStyleClass().add("conversion-dialog-content");
+        VBox.setVgrow(splitPane, Priority.ALWAYS);
+
+        dialog.getDialogPane().setContent(content);
+        dialog.getDialogPane().getButtonTypes().setAll(ButtonType.CANCEL, ButtonType.OK);
+        if (convertedMarkdown.isBlank()) {
+            dialog.getDialogPane().lookupButton(ButtonType.OK).setDisable(true);
+        }
+        return dialog.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
     }
 
     private void setEditorMode(EditorMode mode) {
@@ -962,12 +1083,39 @@ public class MainView {
         }
         try {
             Note noteToDelete = selectedNote;
-            noteRepository.softDelete(noteToDelete);
+            if (noteToDelete.isTrashed()) {
+                noteRepository.softDelete(noteToDelete);
+                scheduleAutoSync();
+                saveStatusLabel.setText("已彻底删除，等待同步");
+            } else {
+                noteRepository.moveToTrash(noteToDelete);
+                saveStatusLabel.setText("已移入回收站");
+            }
             clearLocalFailure();
             selectedNote = null;
             refreshNotes();
         } catch (RuntimeException ex) {
             markLocalFailure(selectedNote, "删除笔记", ex);
+        }
+    }
+
+    private void restoreSelectedNote() {
+        if (selectedNote == null || !selectedNote.isTrashed()) {
+            return;
+        }
+        try {
+            Note noteToRestore = selectedNote;
+            noteRepository.restoreFromTrash(noteToRestore);
+            clearLocalFailure();
+            if (currentFilter == NoteFilter.TRASH) {
+                selectedNote = null;
+                refreshNotes();
+            } else {
+                refreshNotesAndSelect(noteToRestore.getNoteUuid());
+            }
+            saveStatusLabel.setText("已从回收站恢复");
+        } catch (RuntimeException ex) {
+            markLocalFailure(selectedNote, "恢复笔记", ex);
         }
     }
 
@@ -996,6 +1144,9 @@ public class MainView {
         runSync(null, false);
     }
 
+    /**
+     * 启动一次手动或自动同步，并在后台线程里完成推送、拉取和冲突后的界面回调。
+     */
     private void runSync(Button syncButton, boolean manual) {
         if (syncInProgress) {
             if (manual) {
@@ -1051,6 +1202,9 @@ public class MainView {
                     LOGGER.log(Level.WARNING, "同步失败", ex);
                     saveStatusLabel.setText((manual ? "同步失败: " : "自动同步失败: ") + lastSyncError);
                     setSyncLamp("unsynced", "同步失败: " + lastSyncError);
+                    if (manual && isAuthFailure(ex)) {
+                        promptRelogin();
+                    }
                     if (syncButton != null) {
                         showManualSyncFeedback("同步失败", "ghost-button-danger");
                     }
@@ -1070,6 +1224,9 @@ public class MainView {
         scheduleAutoSync();
     }
 
+    /**
+     * 同步结束后刷新列表；如果当前笔记刚好发生冲突，则自动切到新建的冲突副本继续编辑。
+     */
     private void refreshNotesAfterSync(ClientSyncService.SyncSummary summary) {
         if (selectedNote != null) {
             String conflictCopyUuid = summary.conflictCopyUuids().get(selectedNote.getNoteUuid());
@@ -1124,6 +1281,7 @@ public class MainView {
         updateNavigationCount(NoteFilter.TODAY);
         updateNavigationCount(NoteFilter.RECENT_7_DAYS);
         updateNavigationCount(NoteFilter.FAVORITES);
+        updateNavigationCount(NoteFilter.TRASH);
         updateNavigationCount(NoteFilter.CONFLICT_COPIES);
         updateNavigationCount(NoteFilter.ARCHIVED);
     }
@@ -1239,8 +1397,16 @@ public class MainView {
         }
         saveStatusLabel.setText(message);
         updateSyncLamp(selectedNote);
-        updateTimeLabel.setText("更新 " + selectedNote.getUpdateTime());
+        updateTimeLabel.setText("更新 " + formatDisplayTime(selectedNote.getUpdateTime()));
         updateWordCount();
+    }
+
+    private void updateTrashControls(Note note) {
+        boolean trashed = note != null && note.isTrashed();
+        deleteButton.setText(trashed ? "彻底删除" : "删除");
+        restoreButton.setVisible(trashed);
+        restoreButton.setManaged(trashed);
+        restoreButton.setDisable(!trashed);
     }
 
     private void updateSyncLamp(Note note) {
@@ -1352,6 +1518,43 @@ public class MainView {
         return fallback;
     }
 
+    private boolean isAuthFailure(Exception ex) {
+        String message = normalizeErrorMessage(ex, "");
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("token")
+                || normalized.contains("401")
+                || normalized.contains("未登录")
+                || normalized.contains("请先登录");
+    }
+
+    private void promptRelogin() {
+        Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
+        alert.setTitle("登录已过期");
+        alert.setHeaderText("当前登录状态已失效");
+        alert.setContentText("点击“重新登录”返回登录界面，重新获取同步凭据。");
+        alert.getButtonTypes().setAll(ButtonType.CANCEL, new ButtonType("重新登录", ButtonBar.ButtonData.OK_DONE));
+        Window owner = root.getScene() == null ? null : root.getScene().getWindow();
+        if (owner != null) {
+            alert.initOwner(owner);
+        }
+        Optional<ButtonType> result = alert.showAndWait();
+        if (result.isPresent() && "重新登录".equals(result.get().getText())) {
+            configRepository.clearLogin();
+            onLogout.run();
+        }
+    }
+
+    private String formatDisplayTime(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        try {
+            return LocalDateTime.parse(value).format(DISPLAY_TIME_FORMATTER);
+        } catch (Exception ignored) {
+            return value.replace('T', ' ');
+        }
+    }
+
     private void updateWordCount() {
         String plainText = MarkdownTextExtractor.toPlainText(contentEditor.getText());
         long count = plainText.chars().filter(ch -> !Character.isWhitespace(ch)).count();
@@ -1385,6 +1588,12 @@ public class MainView {
         return title.replaceFirst("（冲突副本\\s+[^）]+）$", "").strip();
     }
 
+    private enum EditorMode {
+        EDIT,
+        SPLIT,
+        PREVIEW
+    }
+
     private class NoteCardCell extends ListCell<Note> {
 
         @Override
@@ -1393,15 +1602,26 @@ public class MainView {
             if (empty || note == null) {
                 setText(null);
                 setGraphic(null);
+                setPadding(Insets.EMPTY);
+                setMinHeight(Region.USE_COMPUTED_SIZE);
+                setPrefHeight(Region.USE_COMPUTED_SIZE);
+                setMaxHeight(Region.USE_COMPUTED_SIZE);
                 return;
             }
 
             TextFlow title = highlightText(displayTitle(note), searchField.getText(), "card-title");
             title.setMaxWidth(Double.MAX_VALUE);
+            title.setMinHeight(NOTE_CARD_TITLE_HEIGHT);
+            title.setPrefHeight(NOTE_CARD_TITLE_HEIGHT);
+            title.setMaxHeight(NOTE_CARD_TITLE_HEIGHT);
+            applyFixedHeightClip(title, NOTE_CARD_TITLE_HEIGHT);
 
             TextFlow summary = highlightText(summaryText(note), searchField.getText(), "card-summary");
-            summary.setMaxHeight(42);
             summary.setMaxWidth(Double.MAX_VALUE);
+            summary.setMinHeight(NOTE_CARD_SUMMARY_HEIGHT);
+            summary.setPrefHeight(NOTE_CARD_SUMMARY_HEIGHT);
+            summary.setMaxHeight(NOTE_CARD_SUMMARY_HEIGHT);
+            applyFixedHeightClip(summary, NOTE_CARD_SUMMARY_HEIGHT);
 
             Label meta = new Label(metaText(note));
             meta.getStyleClass().add("card-meta");
@@ -1419,11 +1639,18 @@ public class MainView {
             card.getStyleClass().add("note-card");
             card.setPadding(new Insets(10));
             card.setFillWidth(true);
+            card.setMinHeight(NOTE_CARD_HEIGHT);
+            card.setPrefHeight(NOTE_CARD_HEIGHT);
+            card.setMaxHeight(NOTE_CARD_HEIGHT);
             card.prefWidthProperty().bind(widthProperty().subtract(18));
             card.maxWidthProperty().bind(widthProperty().subtract(18));
             title.prefWidthProperty().bind(card.widthProperty().subtract(20));
             summary.prefWidthProperty().bind(card.widthProperty().subtract(20));
             setText(null);
+            setPadding(new Insets(0, 0, 8, 0));
+            setMinHeight(NOTE_CARD_CELL_HEIGHT);
+            setPrefHeight(NOTE_CARD_CELL_HEIGHT);
+            setMaxHeight(NOTE_CARD_CELL_HEIGHT);
             setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
             setGraphic(card);
         }
@@ -1432,10 +1659,11 @@ public class MainView {
             String category = note.getCategoryName() == null || note.getCategoryName().isBlank()
                     ? "未分类"
                     : note.getCategoryName();
-            String marker = (isConflictCopy(note) ? "冲突副本 " : "")
+            String marker = (note.isTrashed() ? "回收站 " : "")
+                    + (isConflictCopy(note) ? "冲突副本 " : "")
                     + (note.isPinned() ? "置顶 " : "")
                     + (note.isFavorite() ? "收藏 " : "");
-            return marker + category + "  " + note.getUpdateTime();
+            return marker + category + "  " + formatDisplayTime(note.getUpdateTime());
         }
 
         private String syncLampState(Note note) {
@@ -1514,5 +1742,13 @@ public class MainView {
             text.getStyleClass().add(styleClass);
             return text;
         }
+
+        private void applyFixedHeightClip(Region region, double height) {
+            Rectangle clip = new Rectangle();
+            clip.widthProperty().bind(region.widthProperty());
+            clip.setHeight(height);
+            region.setClip(clip);
+        }
     }
 }
+

@@ -22,7 +22,7 @@
 - [x] 提交迁移前 checkpoint。
 - [ ] 记录当前本地数据库 schema 版本和同步协议版本。
 - [ ] 手工 smoke 当前版本：新建、编辑、同步、冲突副本、分类筛选。
-- [ ] 选定 Markdown 渲染方案：Java 库渲染后放入 `WebView`，或前端 JS 渲染。
+- [x] 选定 Markdown 渲染方案：Java 侧渲染 HTML 后放入 `WebView`。
 
 验收标准：
 
@@ -58,7 +58,7 @@
 - [x] 支持编辑/预览/分屏三种模式，先做最小可用版本。
 - [x] 字数统计改为 Markdown 纯文本统计。
 - [x] 卡片摘要从 Markdown 纯文本生成。
-- [ ] 搜索继续覆盖标题、摘要、正文。
+- [x] 搜索继续覆盖标题、摘要、正文。
 - [x] 移除或隐藏 HTML 富文本工具条相关逻辑。
 
 验收标准：
@@ -72,12 +72,14 @@
 
 目标：处理现有 HTML 笔记，避免用户数据丢失。
 
-- [ ] 启动时保留 HTML 笔记原文，不自动破坏性转换。
-- [ ] 增加“转换为 Markdown”能力，先做单篇转换。
+- [x] 启动时保留 HTML 笔记原文，不自动破坏性转换。
+- [x] 增加“转换为 Markdown”能力，先做单篇转换。
+- [x] 增加“转换为 Markdown”前的预览和确认。
 - [ ] 提供批量转换入口前，先完成转换预览和确认。
-- [ ] HTML 转 Markdown 工具保留正文文本、标题、列表、粗斜体、链接、代码块。
+- [x] HTML 转 Markdown 工具保留正文文本、标题、列表、粗斜体、链接、代码块。
+  - 进展：当前转换器已覆盖标题、段落、列表、引用、粗斜体、链接、代码块、图片引用。
 - [ ] 不支持的复杂样式降级为纯文本。
-- [ ] 转换后将 `content_format` 设置为 `MARKDOWN`，并标记本地待同步。
+- [x] 转换后将 `content_format` 设置为 `MARKDOWN`，并标记本地待同步。
 
 验收标准：
 
@@ -89,12 +91,12 @@
 
 目标：Markdown 模型下同步稳定，冲突处理仍然可用。
 
-- [ ] 更新 `SyncNoteRequest`、`SyncChangeNote`、`NoteResponse` 文档。
+- [x] 更新 `SyncNoteRequest`、`SyncChangeNote`、`NoteResponse` 文档。
 - [x] 服务端变化拉取返回 `contentFormat`。
-- [ ] 冲突副本保留原格式字段。
-- [ ] 服务端摘要生成支持 Markdown 去标记。
-- [ ] 补同步测试：Markdown 创建、更新、冲突、拉取、旧 HTML 兼容。
-- [ ] 更新 `docs/api.md` 和 `docs/design.md`。
+- [x] 冲突副本保留原格式字段。
+- [x] 服务端摘要生成支持 Markdown 去标记。
+- [x] 补同步测试：Markdown 创建、更新、冲突、拉取、旧 HTML 兼容。
+- [x] 更新 `docs/api.md` 和 `docs/design.md`。
 
 验收标准：
 

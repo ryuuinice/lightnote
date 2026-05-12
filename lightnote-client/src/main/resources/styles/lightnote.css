@@ -17,8 +17,8 @@
     -fx-font-size: 12px;
     -fx-font-weight: 800;
     -fx-alignment: center;
-    -fx-min-width: 36;
-    -fx-pref-width: 36;
+    -fx-min-width: 80;
+    -fx-pref-width: 80;
     -fx-min-height: 36;
     -fx-pref-height: 36;
 }
@@ -158,7 +158,7 @@
 }
 
 .danger-link-button {
-    -fx-background-color: transparent;
+    -fx-background-color: #f2f5fa;
     -fx-text-fill: #bc4754;
     -fx-padding: 6 8;
 }
@@ -281,7 +281,7 @@
 
 .list-cell {
     -fx-background-color: transparent;
-    -fx-padding: 3 0;
+    -fx-padding: 5 0;
 }
 
 .list-cell:selected .note-card {
@@ -290,14 +290,16 @@
 }
 
 .note-card {
-    -fx-background-color: transparent;
+    -fx-background-color: #f8fbff;
     -fx-background-radius: 7;
     -fx-border-radius: 7;
-    -fx-border-color: transparent;
+    -fx-border-color: #e3eaf5;
+    -fx-border-width: 1;
 }
 
 .note-card:hover {
-    -fx-background-color: #eef3f8;
+    -fx-background-color: #f1f6fc;
+    -fx-border-color: #d4dfef;
 }
 
 .card-title {
@@ -435,6 +437,45 @@
 .editor-mode-switch {
     -fx-padding: 0 0 2 0;
     -fx-alignment: center-left;
+}
+
+.content-format-badge {
+    -fx-background-color: #eef3fb;
+    -fx-background-radius: 999;
+    -fx-text-fill: #5f6f86;
+    -fx-font-size: 11px;
+    -fx-font-weight: 700;
+    -fx-padding: 4 10;
+}
+
+.convert-markdown-button {
+    -fx-padding: 5 10;
+}
+
+.conversion-dialog-content {
+    -fx-background-color: #ffffff;
+}
+
+.conversion-tip {
+    -fx-text-fill: #607086;
+    -fx-font-size: 12px;
+}
+
+.conversion-split-pane {
+    -fx-background-color: #ffffff;
+}
+
+.conversion-split-pane .split-pane-divider {
+    -fx-background-color: #edf1f6;
+}
+
+.conversion-textarea {
+    -fx-font-family: "Cascadia Mono", "JetBrains Mono", "Consolas", monospace;
+    -fx-font-size: 13px;
+}
+
+.conversion-preview {
+    -fx-background-color: #ffffff;
 }
 
 .mode-button {

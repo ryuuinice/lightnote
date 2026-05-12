@@ -10,6 +10,9 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 @Mapper
+/**
+ * MyBatis 映射接口，负责服务端笔记表的读写与同步更新。
+ */
 public interface NoteMapper {
 
     @Select("""
@@ -116,3 +119,4 @@ public interface NoteMapper {
             @Param("now") LocalDateTime now
     );
 }
+

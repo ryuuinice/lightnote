@@ -2,6 +2,9 @@ package com.lightnote.server.dto;
 
 import java.time.LocalDateTime;
 
+/**
+ * 响应模型，用于向调用方返回结构化结果。
+ */
 public record NoteResponse(
         String noteUuid,
         String title,
@@ -54,3 +57,4 @@ public record NoteResponse(
         );
     }
 }
+

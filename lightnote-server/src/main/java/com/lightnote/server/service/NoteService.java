@@ -15,6 +15,9 @@ import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+/**
+ * 服务端笔记服务，负责笔记 CRUD、版本维护和摘要规范化。
+ */
 @Service
 public class NoteService {
 
@@ -36,12 +39,18 @@ public class NoteService {
         this.serverVersionService = serverVersionService;
     }
 
+    /**
+     * 查询当前用户未删除的笔记列表，并转换成接口响应模型。
+     */
     public List<NoteResponse> listActive(Long userId) {
         return noteMapper.findActiveByUserId(userId).stream()
                 .map(this::toResponse)
                 .toList();
     }
 
+    /**
+     * 新建笔记并写入同步日志，返回包含版本信息的最新视图。
+     */
     @Transactional
     public NoteResponse create(Long userId, NoteCreateRequest request) {
         LocalDateTime now = LocalDateTime.now();
@@ -69,6 +78,9 @@ public class NoteService {
         return toResponse(note);
     }
 
+    /**
+     * 更新现有笔记，并在版本冲突时阻止覆盖服务端最新内容。
+     */
     @Transactional
     public NoteResponse update(Long userId, String noteUuid, NoteUpdateRequest request) {
         NoteEntity current = requireNote(userId, noteUuid);
@@ -95,6 +107,9 @@ public class NoteService {
         return toResponse(current);
     }
 
+    /**
+     * 软删除笔记，同时推进 objectVersion 与全局 serverVersion。
+     */
     @Transactional
     public void delete(Long userId, String noteUuid) {
         NoteEntity current = requireNote(userId, noteUuid);
@@ -107,6 +122,9 @@ public class NoteService {
         syncLogMapper.insertLog(userId, OBJECT_TYPE_NOTE, current.getNoteUuid(), "DELETE", serverVersion, now);
     }
 
+    /**
+     * 按用户和 UUID 获取笔记，不存在时抛出业务异常。
+     */
     private NoteEntity requireNote(Long userId, String noteUuid) {
         NoteEntity note = noteMapper.findByUserIdAndUuid(userId, noteUuid);
         if (note == null || note.getIsDeleted() == 1) {
@@ -147,6 +165,9 @@ public class NoteService {
         return normalized;
     }
 
+    /**
+     * 根据正文格式计算摘要，Markdown 会先去标记再截断。
+     */
     private String normalizeSummary(String summary, String content, String contentFormat) {
         if (summary != null && !summary.isBlank()) {
             return limit(summary.strip(), 512);
@@ -164,3 +185,4 @@ public class NoteService {
         return value.substring(0, maxLength);
     }
 }
+

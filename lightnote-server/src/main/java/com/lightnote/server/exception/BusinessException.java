@@ -1,5 +1,8 @@
 package com.lightnote.server.exception;
 
+/**
+ * 服务端业务异常，表示可预期的业务失败场景。
+ */
 public class BusinessException extends RuntimeException {
 
     private final int code;
@@ -13,3 +16,4 @@ public class BusinessException extends RuntimeException {
         return code;
     }
 }
+

@@ -2,6 +2,9 @@ package com.lightnote.server.entity;
 
 import java.time.LocalDateTime;
 
+/**
+ * 服务端实体对象，对应数据库中的持久化记录。
+ */
 public class UserEntity {
 
     private Long id;
@@ -68,3 +71,4 @@ public class UserEntity {
         this.updateTime = updateTime;
     }
 }
+

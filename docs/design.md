@@ -78,8 +78,8 @@ LightNote 是一个面向个人使用的轻量化笔记和备忘录工具，适�
 - 多人实时协作。
 - 标签 UI。
 - 附件和图片上传。
-- Markdown 预览。
-- 语法高亮编辑器。
+- 复杂所见即所得富文本编辑器。
+- 图片和附件同步。
 - 自动后台同步。
 - 端到端加密。
 - 历史版本和回收站 UI。
@@ -385,7 +385,8 @@ GET /api/sync/changes?sinceVersion={last_sync_version}
 
 - 服务端版本保留为原笔记。
 - 客户端本地未上传版本另存为新笔记。
-- 冲突副本标题格式：`原标题 - 冲突副本 - yyyyMMdd-HHmmss`。
+- 冲突副本标题格式：`原标题（冲突副本 MM-dd HH:mm）`。
+- 冲突副本保留原正文、原 `content_format` 和本地最新编辑内容。
 - 冲突副本状态为 `DIRTY`，下次同步作为新笔记上传。
 
 ## 11. 同步接口详情
@@ -432,12 +433,13 @@ Request:
       "baseObjectVersion": 3,
       "title": "MySQL 慢查询排查",
       "content": "Markdown 内容",
+      "contentFormat": "MARKDOWN",
       "summary": "Markdown 内容",
       "categoryName": "数据库",
-      "isPinned": false,
-      "isFavorite": true,
-      "isArchived": false,
-      "isDeleted": false,
+      "pinned": false,
+      "favorite": true,
+      "archived": false,
+      "deleted": false,
       "clientUpdateTime": "2026-05-07T16:30:00"
     }
   ]
@@ -485,12 +487,13 @@ Response:
         "serverVersion": 118,
         "title": "Linux 常用命令",
         "content": "systemctl status nginx",
+        "contentFormat": "MARKDOWN",
         "summary": "systemctl status nginx",
         "categoryName": "Linux",
-        "isPinned": false,
-        "isFavorite": false,
-        "isArchived": false,
-        "isDeleted": false,
+        "pinned": false,
+        "favorite": false,
+        "archived": false,
+        "deleted": false,
         "createTime": "2026-05-07T10:00:00",
         "updateTime": "2026-05-07T16:40:00",
         "deleteTime": null
@@ -499,6 +502,12 @@ Response:
   }
 }
 ```
+
+补充说明：
+
+- `contentFormat` 支持 `HTML` 和 `MARKDOWN`。
+- 服务端按 `contentFormat` 生成摘要，Markdown 会先去标记再写入 `summary`。
+- 客户端拉取到 `HTML` 旧笔记时继续按 HTML 展示或提供单篇转换入口，不会强制自动改写为 Markdown。
 
 ## 12. 项目目录结构
 

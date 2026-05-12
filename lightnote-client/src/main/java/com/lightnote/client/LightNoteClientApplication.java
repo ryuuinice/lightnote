@@ -15,6 +15,9 @@ import javafx.stage.Stage;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+/**
+ * 客户端应用入口，负责初始化数据库、日志与主界面启动流程。
+ */
 public class LightNoteClientApplication extends Application {
 
     private static final Logger LOGGER = AppLogger.logger(LightNoteClientApplication.class);
@@ -93,3 +96,4 @@ public class LightNoteClientApplication extends Application {
                 LOGGER.log(Level.SEVERE, "未捕获异常 [" + thread.getName() + "]", throwable));
     }
 }
+

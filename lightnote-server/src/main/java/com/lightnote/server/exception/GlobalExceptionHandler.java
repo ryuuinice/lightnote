@@ -12,6 +12,9 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+/**
+ * 全局异常处理器，负责将校验、业务和系统异常转换成统一接口响应。
+ */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -38,3 +41,4 @@ public class GlobalExceptionHandler {
                 .body(ApiResponse.error(500, "internal server error"));
     }
 }
+

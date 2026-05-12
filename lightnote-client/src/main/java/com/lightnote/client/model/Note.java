@@ -1,5 +1,8 @@
 package com.lightnote.client.model;
 
+/**
+ * 客户端笔记模型，承载本地编辑态、同步态和展示所需的完整字段。
+ */
 public class Note {
 
     private Long id;
@@ -12,6 +15,7 @@ public class Note {
     private boolean pinned;
     private boolean favorite;
     private boolean archived;
+    private boolean trashed;
     private boolean deleted;
     private long objectVersion;
     private long serverVersion;
@@ -101,6 +105,14 @@ public class Note {
         this.archived = archived;
     }
 
+    public boolean isTrashed() {
+        return trashed;
+    }
+
+    public void setTrashed(boolean trashed) {
+        this.trashed = trashed;
+    }
+
     public boolean isDeleted() {
         return deleted;
     }
@@ -165,3 +177,4 @@ public class Note {
         this.lastSyncTime = lastSyncTime;
     }
 }
+

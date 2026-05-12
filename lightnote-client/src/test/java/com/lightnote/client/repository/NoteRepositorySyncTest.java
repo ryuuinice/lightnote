@@ -15,6 +15,8 @@ import com.lightnote.client.remote.SyncItemResult;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.regex.Pattern;
 import java.util.Comparator;
 import java.util.List;
@@ -89,6 +91,11 @@ class NoteRepositorySyncTest {
         note.setContent("<p>local newer text</p>");
         repository.save(note);
         String pushedUpdateTime = note.getUpdateTime();
+        try {
+            Thread.sleep(2);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+        }
         note.setContent("<p>local newer text after push</p>");
         repository.save(note);
         repository.markSynced(new SyncItemResult(note.getNoteUuid(), 4L, 20L), pushedUpdateTime);
@@ -247,9 +254,26 @@ class NoteRepositorySyncTest {
         repository.save(source);
         repository.createConflictCopy(repository.findByUuid(source.getNoteUuid()));
 
+        Note trashed = repository.createEmpty();
+        trashed.setTitle("Trash");
+        repository.save(trashed);
+        repository.moveToTrash(trashed);
+
         assertEquals(1L, repository.countByFilter(NoteFilter.FAVORITES));
         assertEquals(1L, repository.countByFilter(NoteFilter.ARCHIVED));
+        assertEquals(1L, repository.countByFilter(NoteFilter.TRASH));
         assertEquals(1L, repository.countByFilter(NoteFilter.CONFLICT_COPIES));
+    }
+
+    @Test
+    void countByFilterFavoritesDoesNotRequireUncategorizedNotes() {
+        Note favorite = repository.createEmpty();
+        favorite.setTitle("Categorized Favorite");
+        favorite.setCategoryName("运维");
+        favorite.setFavorite(true);
+        repository.save(favorite);
+
+        assertEquals(1L, repository.countByFilter(NoteFilter.FAVORITES));
     }
 
     @Test
@@ -262,6 +286,27 @@ class NoteRepositorySyncTest {
 
         assertNotNull(conflictCopy);
         assertEquals(true, CONFLICT_COPY_TITLE_PATTERN.matcher(conflictCopy.getTitle()).matches());
+    }
+
+    @Test
+    void createConflictCopyPreservesMarkdownFormatAndContent() {
+        Note source = repository.createEmpty();
+        source.setTitle("Markdown Source");
+        source.setContentFormat(ContentFormat.MARKDOWN);
+        source.setContent("""
+                # Heading
+
+                Keep <literal> tags.
+                """);
+        repository.save(source);
+
+        Note conflictCopy = repository.createConflictCopy(repository.findByUuid(source.getNoteUuid()));
+
+        assertNotNull(conflictCopy);
+        assertEquals(ContentFormat.MARKDOWN, conflictCopy.getContentFormat());
+        assertEquals(source.getContent(), conflictCopy.getContent());
+        assertEquals("Heading Keep <literal> tags.", conflictCopy.getSummary());
+        assertEquals(SyncStatus.DIRTY, conflictCopy.getSyncStatus());
     }
 
     @Test
@@ -329,6 +374,52 @@ class NoteRepositorySyncTest {
         assertNotNull(stored);
         assertEquals("平台", stored.getCategoryName());
         assertEquals(1, repository.listByFilter("", NoteFilter.ALL, "平台").size());
+    }
+
+    @Test
+    void moveToTrashHidesNoteFromDefaultListAndShowsItInTrash() {
+        Note note = repository.createEmpty();
+        note.setTitle("Trash me");
+        repository.save(note);
+
+        repository.moveToTrash(note);
+
+        assertEquals(0, repository.listByFilter("", NoteFilter.ALL).size());
+        List<Note> trashNotes = repository.listByFilter("", NoteFilter.TRASH);
+        assertEquals(1, trashNotes.size());
+        assertEquals("Trash me", trashNotes.get(0).getTitle());
+        assertEquals(true, trashNotes.get(0).isTrashed());
+    }
+
+    @Test
+    void restoreFromTrashReturnsNoteToDefaultList() {
+        Note note = repository.createEmpty();
+        note.setTitle("Restore me");
+        repository.save(note);
+        repository.moveToTrash(note);
+
+        repository.restoreFromTrash(repository.findByUuid(note.getNoteUuid()));
+
+        assertEquals(1, repository.listByFilter("", NoteFilter.ALL).size());
+        assertEquals(0, repository.listByFilter("", NoteFilter.TRASH).size());
+    }
+
+    @Test
+    void permanentDeleteFromTrashCreatesDeletePendingTombstone() {
+        Note note = repository.createEmpty();
+        note.setTitle("Delete forever");
+        repository.save(note);
+        repository.moveToTrash(note);
+
+        repository.softDelete(repository.findByUuid(note.getNoteUuid()));
+
+        assertEquals(0, repository.listByFilter("", NoteFilter.TRASH).size());
+        Note stored = repository.findByUuid(note.getNoteUuid());
+        assertNotNull(stored);
+        assertEquals(true, stored.isDeleted());
+        assertEquals(SyncStatus.DELETE_PENDING, stored.getSyncStatus());
+        assertEquals(1, repository.listPendingSync().size());
+        assertEquals(note.getNoteUuid(), repository.listPendingSync().get(0).getNoteUuid());
     }
 
     @Test
@@ -424,5 +515,65 @@ class NoteRepositorySyncTest {
         assertEquals(ContentFormat.MARKDOWN, updated.getContentFormat());
         assertEquals("# Remote\n\n![Alt](lightnote-asset://asset-1)", updated.getContent());
         assertEquals("Remote Alt", updated.getSummary());
+    }
+
+    @Test
+    void todayAndRecentFiltersUseCreateTimeWindow() {
+        LocalDate today = LocalDate.now();
+        LocalDateTime todayTime = today.atTime(10, 0);
+        LocalDateTime threeDaysAgo = today.minusDays(3).atTime(10, 0);
+        LocalDateTime tenDaysAgo = today.minusDays(10).atTime(10, 0);
+
+        Note todayNote = repository.createEmpty();
+        todayNote.setTitle("Today");
+        repository.save(todayNote);
+
+        repository.applyRemote(new RemoteNote(
+                "recent-note",
+                "UPDATE",
+                1L,
+                2L,
+                ContentFormat.HTML.name(),
+                "Recent",
+                "<p>recent</p>",
+                "",
+                "",
+                false,
+                false,
+                false,
+                false,
+                threeDaysAgo.toString(),
+                todayTime.toString(),
+                null
+        ));
+
+        repository.applyRemote(new RemoteNote(
+                "old-note",
+                "UPDATE",
+                1L,
+                3L,
+                ContentFormat.HTML.name(),
+                "Old",
+                "<p>old</p>",
+                "",
+                "",
+                false,
+                false,
+                false,
+                false,
+                tenDaysAgo.toString(),
+                todayTime.toString(),
+                null
+        ));
+
+        List<String> todayTitles = repository.listByFilter("", NoteFilter.TODAY).stream()
+                .map(Note::getTitle)
+                .toList();
+        List<String> recentTitles = repository.listByFilter("", NoteFilter.RECENT_7_DAYS).stream()
+                .map(Note::getTitle)
+                .toList();
+
+        assertEquals(List.of("Today"), todayTitles);
+        assertEquals(List.of("Today", "Recent"), recentTitles);
     }
 }

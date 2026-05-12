@@ -4,6 +4,9 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
+/**
+ * 请求模型，用于接收客户端提交的接口参数。
+ */
 public record NoteUpdateRequest(
         @NotNull Long baseObjectVersion,
         @NotBlank @Size(max = 255) String title,
@@ -28,3 +31,4 @@ public record NoteUpdateRequest(
         this(baseObjectVersion, title, content, null, summary, categoryName, pinned, favorite, archived);
     }
 }
+

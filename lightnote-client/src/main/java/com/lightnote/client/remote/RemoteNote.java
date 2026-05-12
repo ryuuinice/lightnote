@@ -2,6 +2,9 @@ package com.lightnote.client.remote;
 
 import com.lightnote.client.model.ContentFormat;
 
+/**
+ * 服务端变更模型，表示客户端拉取或冲突回包中的单条远端笔记。
+ */
 public record RemoteNote(
         String noteUuid,
         String operation,
@@ -57,3 +60,4 @@ public record RemoteNote(
         );
     }
 }
+

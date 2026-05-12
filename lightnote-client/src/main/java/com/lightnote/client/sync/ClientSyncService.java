@@ -15,6 +15,9 @@ import java.util.Map;
 import java.util.function.Function;
 import java.util.logging.Logger;
 
+/**
+ * 客户端同步服务，负责登录会话下的推送、拉取、冲突处理与同步结果汇总。
+ */
 public class ClientSyncService {
 
     private static final Logger LOGGER = AppLogger.logger(ClientSyncService.class);
@@ -37,6 +40,9 @@ public class ClientSyncService {
         this.apiClientFactory = apiClientFactory;
     }
 
+    /**
+     * 执行登录并持久化服务端地址与 JWT，会话建立后供后续同步直接复用。
+     */
     public LoginResponse login(String serverUrl, String username, String password) {
         LightNoteApiClient apiClient = apiClientFactory.apply(serverUrl);
         LoginResponse response = apiClient.login(username, password);
@@ -45,6 +51,9 @@ public class ClientSyncService {
         return response;
     }
 
+    /**
+     * 执行一次完整同步：先推送本地待同步笔记，再分页拉取远端增量，并在本地生成冲突副本。
+     */
     public SyncSummary syncNow() {
         String serverUrl = configRepository.serverUrl();
         String token = configRepository.token()
@@ -97,6 +106,9 @@ public class ClientSyncService {
         );
     }
 
+    /**
+     * 同步结果摘要，供界面层展示上传、冲突、拉取数量以及冲突副本映射。
+     */
     public record SyncSummary(
             int pendingCount,
             int pushedCount,
@@ -107,3 +119,4 @@ public class ClientSyncService {
     ) {
     }
 }
+

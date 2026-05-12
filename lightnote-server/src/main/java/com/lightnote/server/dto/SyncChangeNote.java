@@ -2,6 +2,9 @@ package com.lightnote.server.dto;
 
 import java.time.LocalDateTime;
 
+/**
+ * 同步或接口层使用的笔记数据模型。
+ */
 public record SyncChangeNote(
         String noteUuid,
         String operation,
@@ -57,3 +60,4 @@ public record SyncChangeNote(
         );
     }
 }
+

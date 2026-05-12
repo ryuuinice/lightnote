@@ -11,6 +11,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * 应用配置仓库，负责登录信息、同步游标、界面偏好和分类目录的本地持久化。
+ */
 public class AppConfigRepository {
 
     private final Path databasePath;
@@ -189,3 +192,4 @@ public class AppConfigRepository {
         return DriverManager.getConnection("jdbc:sqlite:" + databasePath);
     }
 }
+

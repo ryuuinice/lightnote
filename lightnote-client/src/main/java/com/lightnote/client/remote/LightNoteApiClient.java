@@ -20,6 +20,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 远端 API 客户端，负责与服务端登录、推送同步和拉取增量变更。
+ */
 public class LightNoteApiClient {
 
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -32,12 +35,18 @@ public class LightNoteApiClient {
         this.serverUrl = trimTrailingSlash(serverUrl);
     }
 
+    /**
+     * 调用登录接口并解析令牌信息。
+     */
     public LoginResponse login(String username, String password) {
         Map<String, String> body = Map.of("username", username, "password", password);
         JsonNode data = sendJson("POST", "/api/auth/login", null, body);
         return new LoginResponse(data.path("token").asText(), data.path("expireSeconds").asLong());
     }
 
+    /**
+     * 将本地待同步笔记序列化为同步请求并提交到服务端。
+     */
     public SyncPushResponse push(String token, long lastSyncVersion, List<Note> notes) {
         Map<String, Object> body = new HashMap<>();
         body.put("lastSyncVersion", lastSyncVersion);
@@ -46,6 +55,9 @@ public class LightNoteApiClient {
         return parsePushResponse(data);
     }
 
+    /**
+     * 拉取指定版本之后的增量变化，供客户端按 serverVersion 顺序应用。
+     */
     public SyncChangesResponse changes(String token, long sinceVersion, int limit) {
         JsonNode data = sendJson("GET", "/api/sync/changes?sinceVersion=" + sinceVersion + "&limit=" + limit, token, null);
         List<RemoteNote> notes = new ArrayList<>();
@@ -55,6 +67,9 @@ public class LightNoteApiClient {
         return new SyncChangesResponse(data.path("serverVersion").asLong(), data.path("hasMore").asBoolean(), notes);
     }
 
+    /**
+     * 将本地笔记转换为服务端同步协议结构，并按正文格式决定发送原始 Markdown 还是规范化 HTML。
+     */
     private Map<String, Object> toSyncNoteRequest(Note note) {
         Map<String, Object> item = new HashMap<>();
         item.put("noteUuid", note.getNoteUuid());
@@ -122,6 +137,9 @@ public class LightNoteApiClient {
         return HtmlContentSanitizer.normalizeForStorage(note.getContent());
     }
 
+    /**
+     * 统一处理 JSON 请求、鉴权头和错误映射，把网络异常翻译成更可读的中文错误。
+     */
     private JsonNode sendJson(String method, String path, String token, Object body) {
         try {
             HttpRequest.Builder builder = HttpRequest.newBuilder()
@@ -180,3 +198,4 @@ public class LightNoteApiClient {
         return "网络请求失败";
     }
 }
+

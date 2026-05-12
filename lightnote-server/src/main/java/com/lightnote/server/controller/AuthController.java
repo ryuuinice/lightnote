@@ -10,6 +10,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+/**
+ * 控制器，负责暴露对应业务模块的 HTTP 接口。
+ */
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
@@ -25,3 +28,4 @@ public class AuthController {
         return ApiResponse.success(authService.login(request));
     }
 }
+

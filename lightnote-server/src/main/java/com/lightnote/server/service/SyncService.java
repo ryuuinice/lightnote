@@ -20,6 +20,9 @@ import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+/**
+ * 服务端同步服务，负责处理客户端推送、冲突判断和增量变更拉取。
+ */
 @Service
 public class SyncService {
 
@@ -42,6 +45,9 @@ public class SyncService {
         this.serverVersionService = serverVersionService;
     }
 
+    /**
+     * 处理客户端推送的本地变更，并返回成功项、冲突项以及最新服务端版本。
+     */
     @Transactional
     public SyncPushResponse push(Long userId, SyncPushRequest request) {
         List<SyncItemResult> successItems = new ArrayList<>();
@@ -69,6 +75,9 @@ public class SyncService {
         );
     }
 
+    /**
+     * 按分页拉取指定版本之后的服务端增量变化。
+     */
     public SyncChangesResponse changes(Long userId, long sinceVersion, int limit) {
         int safeLimit = Math.max(1, Math.min(limit, 500));
         List<SyncChangeEntity> rows = syncLogMapper.findNoteChanges(userId, sinceVersion, safeLimit + 1);
@@ -87,6 +96,9 @@ public class SyncService {
         return new SyncChangesResponse(responseServerVersion, hasMore, notes);
     }
 
+    /**
+     * 创建服务端还不存在的笔记，并写入首条同步日志。
+     */
     private void handleCreate(
             Long userId,
             SyncNoteRequest item,
@@ -112,6 +124,9 @@ public class SyncService {
         successItems.add(new SyncItemResult(item.noteUuid(), note.getObjectVersion(), serverVersion));
     }
 
+    /**
+     * 更新服务端已有笔记；如果基线版本落后，则改为返回冲突项。
+     */
     private void handleUpdate(
             Long userId,
             SyncNoteRequest item,
@@ -139,6 +154,9 @@ public class SyncService {
         successItems.add(new SyncItemResult(item.noteUuid(), current.getObjectVersion(), serverVersion));
     }
 
+    /**
+     * 软删除服务端笔记，并保证重复删除请求保持幂等。
+     */
     private void handleDelete(
             Long userId,
             SyncNoteRequest item,
@@ -194,6 +212,9 @@ public class SyncService {
         return normalized;
     }
 
+    /**
+     * 将客户端正文、格式和摘要字段统一写回服务端实体。
+     */
     private void applyClientFields(NoteEntity note, SyncNoteRequest item) {
         note.setTitle(item.title() == null || item.title().isBlank() ? "未命名笔记" : item.title());
         note.setContent(item.content());
@@ -274,3 +295,4 @@ public class SyncService {
         return value.substring(0, maxLength);
     }
 }
+

@@ -13,6 +13,9 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
 @Component
+/**
+ * 服务端表结构迁移器，负责启动时补齐必要字段和兼容旧库结构。
+ */
 public class ServerSchemaMigrator implements ApplicationRunner {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ServerSchemaMigrator.class);
@@ -64,3 +67,4 @@ public class ServerSchemaMigrator implements ApplicationRunner {
         }
     }
 }
+

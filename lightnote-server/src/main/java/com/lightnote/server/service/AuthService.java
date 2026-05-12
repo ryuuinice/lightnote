@@ -9,6 +9,9 @@ import com.lightnote.server.security.JwtService;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
+/**
+ * 认证服务，负责账号密码校验和登录令牌签发。
+ */
 @Service
 public class AuthService {
 
@@ -25,6 +28,9 @@ public class AuthService {
         this.jwtService = jwtService;
     }
 
+    /**
+     * 校验用户凭据并签发新的 JWT 令牌。
+     */
     public LoginResponse login(LoginRequest request) {
         UserEntity user = userMapper.findByUsername(request.username());
         if (user == null || !passwordEncoder.matches(request.password(), user.getPasswordHash())) {
@@ -38,3 +44,4 @@ public class AuthService {
         return new LoginResponse(token, jwtService.getExpireSeconds());
     }
 }
+

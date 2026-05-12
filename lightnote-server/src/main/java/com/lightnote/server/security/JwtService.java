@@ -11,6 +11,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 @Service
+/**
+ * JWT 服务，负责令牌生成、解析和有效性校验。
+ */
 public class JwtService {
 
     private final SecretKey secretKey;
@@ -52,3 +55,4 @@ public class JwtService {
         return expireSeconds;
     }
 }
+

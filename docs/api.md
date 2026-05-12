@@ -44,6 +44,11 @@ Response:
 }
 ```
 
+Notes:
+
+- `contentFormat` supports `HTML` and `MARKDOWN`.
+- The server keeps the original `content` payload and generates `summary` according to `contentFormat`.
+
 Use the token on protected endpoints:
 
 ```text
@@ -200,6 +205,44 @@ client.baseObjectVersion < server.objectVersion
 
 When a conflict occurs, the item is returned in `conflictItems` and the server does not overwrite the existing note.
 
+Conflict response example:
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "serverVersion": 121,
+    "successItems": [],
+    "conflictItems": [
+      {
+        "noteUuid": "uuid-1",
+        "clientBaseObjectVersion": 3,
+        "serverObjectVersion": 4,
+        "serverNote": {
+          "noteUuid": "uuid-1",
+          "operation": "UPDATE",
+          "objectVersion": 4,
+          "serverVersion": 121,
+          "title": "MySQL 慢查询排查",
+          "content": "# Server note\n\nKeep markdown.",
+          "contentFormat": "MARKDOWN",
+          "summary": "Server note Keep markdown.",
+          "categoryName": "数据库",
+          "pinned": false,
+          "favorite": true,
+          "archived": false,
+          "deleted": false,
+          "createTime": "2026-05-07T18:00:00",
+          "updateTime": "2026-05-07T20:40:00",
+          "deleteTime": null
+        }
+      }
+    ]
+  }
+}
+```
+
 ### Pull Remote Changes
 
 `GET /api/sync/changes?sinceVersion=100&limit=200`
@@ -238,3 +281,8 @@ Response:
 ```
 
 The client should apply returned notes in ascending `serverVersion` order and then store the returned top-level `serverVersion` as `last_sync_version`.
+
+Compatibility notes:
+
+- Old HTML notes are still returned with `contentFormat: "HTML"`.
+- Markdown notes keep raw Markdown text in `content`; clients should not HTML-escape it during sync.

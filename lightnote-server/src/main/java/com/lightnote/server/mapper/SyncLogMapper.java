@@ -10,6 +10,9 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 @Mapper
+/**
+ * MyBatis 映射接口，负责同步日志和全局 serverVersion 的持久化访问。
+ */
 public interface SyncLogMapper {
 
     @Select("""
@@ -83,3 +86,4 @@ public interface SyncLogMapper {
             @Param("limit") int limit
     );
 }
+

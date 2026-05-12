@@ -2,6 +2,9 @@ package com.lightnote.client.model;
 
 import java.util.Locale;
 
+/**
+ * 正文格式枚举，用于区分 HTML 原文与 Markdown 正文。
+ */
 public enum ContentFormat {
     HTML,
     MARKDOWN;
@@ -17,3 +20,4 @@ public enum ContentFormat {
         }
     }
 }
+

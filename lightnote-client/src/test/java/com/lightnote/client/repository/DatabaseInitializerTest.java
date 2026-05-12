@@ -53,7 +53,9 @@ class DatabaseInitializerTest {
         assertTrue(initializer.initializationLog().stream().anyMatch(line -> line.contains("已确认 notes 表")));
         assertTrue(initializer.initializationLog().stream().anyMatch(line -> line.contains("执行迁移 v1")));
         assertTrue(initializer.initializationLog().stream().anyMatch(line -> line.contains("执行迁移 v2")));
+        assertTrue(initializer.initializationLog().stream().anyMatch(line -> line.contains("执行迁移 v3")));
         assertTrue(columnExists(initializer.getDatabasePath(), "notes", "content_format"));
+        assertTrue(columnExists(initializer.getDatabasePath(), "notes", "is_trashed"));
     }
 
     @Test
@@ -85,7 +87,7 @@ class DatabaseInitializerTest {
         second.initialize();
 
         assertTrue(second.initializationLog().stream().anyMatch(line -> line.contains("数据库无需迁移")));
-        assertEquals(2, readUserVersion(second.getDatabasePath()));
+        assertEquals(3, readUserVersion(second.getDatabasePath()));
     }
 
     private int readUserVersion(Path databasePath) throws Exception {

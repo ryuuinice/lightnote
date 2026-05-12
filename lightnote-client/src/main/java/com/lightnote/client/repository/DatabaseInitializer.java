@@ -10,9 +10,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
+/**
+ * 数据库初始化器，负责本地数据目录选择、表结构创建与迁移升级。
+ */
 public class DatabaseInitializer {
 
-    private static final int CURRENT_SCHEMA_VERSION = 2;
+    private static final int CURRENT_SCHEMA_VERSION = 3;
 
     private Path dataDirectory;
     private Path databasePath;
@@ -65,6 +68,7 @@ public class DatabaseInitializer {
                             is_pinned INTEGER NOT NULL DEFAULT 0,
                             is_favorite INTEGER NOT NULL DEFAULT 0,
                             is_archived INTEGER NOT NULL DEFAULT 0,
+                            is_trashed INTEGER NOT NULL DEFAULT 0,
                             is_deleted INTEGER NOT NULL DEFAULT 0,
                             object_version INTEGER NOT NULL DEFAULT 0,
                             server_version INTEGER NOT NULL DEFAULT 0,
@@ -161,6 +165,13 @@ public class DatabaseInitializer {
                 }
                 statement.executeUpdate("PRAGMA user_version = 2");
             }
+            case 3 -> {
+                initializationLog.add("执行迁移 v3: 增加本地回收站字段");
+                if (!columnExists(statement, "notes", "is_trashed")) {
+                    statement.executeUpdate("ALTER TABLE notes ADD COLUMN is_trashed INTEGER NOT NULL DEFAULT 0");
+                }
+                statement.executeUpdate("PRAGMA user_version = 3");
+            }
             default -> throw new IllegalStateException("Unsupported schema version: " + targetVersion);
         }
     }
@@ -240,3 +251,4 @@ public class DatabaseInitializer {
     private record CandidateDirectory(Path path, String source) {
     }
 }
+

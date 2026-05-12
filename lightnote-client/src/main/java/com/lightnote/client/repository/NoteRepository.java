@@ -23,6 +23,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * 笔记仓库，负责本地 SQLite 中笔记的增删改查、筛选、搜索与同步字段维护。
+ */
 public class NoteRepository {
 
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
@@ -35,6 +38,9 @@ public class NoteRepository {
         this.databasePath = databasePath;
     }
 
+    /**
+     * 查询默认活动笔记列表；有搜索词时退化为标题、正文、摘要的模糊搜索。
+     */
     public List<Note> listActive(String query) {
         String normalized = query == null ? "" : query.trim();
         if (normalized.isEmpty()) {
@@ -42,6 +48,7 @@ public class NoteRepository {
                     SELECT *
                     FROM notes
                     WHERE is_deleted = 0
+                      AND is_trashed = 0
                       AND is_archived = 0
                     ORDER BY is_pinned DESC, update_time DESC
                     """);
@@ -75,11 +82,14 @@ public class NoteRepository {
         return searchLikeWithWhere(normalized, where);
     }
 
+    /**
+     * 统计某个筛选入口下的笔记数量，供侧边栏徽标实时展示。
+     */
     public long countByFilter(NoteFilter filter) {
         NoteFilter safeFilter = filter == null ? NoteFilter.ALL : filter;
         String where = safeFilter == NoteFilter.ALL
-                ? "is_deleted = 0 AND is_archived = 0"
-                : buildWhereClause(safeFilter, "");
+                ? "is_deleted = 0 AND is_trashed = 0 AND is_archived = 0"
+                : buildWhereClause(safeFilter, null);
         String sql = "SELECT COUNT(*) FROM notes WHERE " + where;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql);
@@ -90,6 +100,9 @@ public class NoteRepository {
         }
     }
 
+    /**
+     * 汇总当前所有分类及其笔记数，未分类会归并为空字符串类别。
+     */
     public List<CategorySummary> listCategorySummaries() {
         String sql = """
                 SELECT
@@ -97,6 +110,7 @@ public class NoteRepository {
                     COUNT(*) AS note_count
                 FROM notes
                 WHERE is_deleted = 0
+                  AND is_trashed = 0
                   AND is_archived = 0
                 GROUP BY normalized_category_name
                 ORDER BY
@@ -120,6 +134,9 @@ public class NoteRepository {
         }
     }
 
+    /**
+     * 批量重命名现有分类，保持同一分类下的笔记一起迁移。
+     */
     public void renameCategory(String previousName, String nextName) {
         String previous = normalizeCategoryName(previousName);
         String next = normalizeCategoryName(nextName);
@@ -141,6 +158,9 @@ public class NoteRepository {
         }
     }
 
+    /**
+     * 创建一条默认 Markdown 空笔记，并立即落库以便界面可以直接选中编辑。
+     */
     public Note createEmpty() {
         Note note = new Note();
         String now = now();
@@ -153,6 +173,7 @@ public class NoteRepository {
         note.setPinned(false);
         note.setFavorite(false);
         note.setArchived(false);
+        note.setTrashed(false);
         note.setDeleted(false);
         note.setObjectVersion(0);
         note.setServerVersion(0);
@@ -163,9 +184,9 @@ public class NoteRepository {
         String sql = """
                 INSERT INTO notes (
                     note_uuid, title, content, content_format, summary, category_name,
-                    is_pinned, is_favorite, is_archived, is_deleted,
+                    is_pinned, is_favorite, is_archived, is_trashed, is_deleted,
                     object_version, server_version, sync_status, create_time, update_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
@@ -182,6 +203,9 @@ public class NoteRepository {
         }
     }
 
+    /**
+     * 保存笔记当前编辑结果，同时规范化标题、摘要、分类和本地同步状态。
+     */
     public void save(Note note) {
         if (note.getId() == null) {
             throw new IllegalArgumentException("Cannot save note without id");
@@ -205,6 +229,7 @@ public class NoteRepository {
                     is_pinned = ?,
                     is_favorite = ?,
                     is_archived = ?,
+                    is_trashed = ?,
                     sync_status = ?,
                     update_time = ?
                 WHERE id = ?
@@ -219,12 +244,55 @@ public class NoteRepository {
             statement.setInt(6, note.isPinned() ? 1 : 0);
             statement.setInt(7, note.isFavorite() ? 1 : 0);
             statement.setInt(8, note.isArchived() ? 1 : 0);
-            statement.setString(9, note.getSyncStatus().name());
-            statement.setString(10, note.getUpdateTime());
-            statement.setLong(11, note.getId());
+            statement.setInt(9, note.isTrashed() ? 1 : 0);
+            statement.setString(10, note.getSyncStatus().name());
+            statement.setString(11, note.getUpdateTime());
+            statement.setLong(12, note.getId());
             statement.executeUpdate();
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to save note", ex);
+        }
+    }
+
+    public void moveToTrash(Note note) {
+        if (note == null || note.getId() == null) {
+            return;
+        }
+        String now = now();
+        String sql = """
+                UPDATE notes
+                SET is_trashed = 1,
+                    update_time = ?
+                WHERE id = ?
+                """;
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, now);
+            statement.setLong(2, note.getId());
+            statement.executeUpdate();
+        } catch (SQLException ex) {
+            throw new IllegalStateException("Failed to move note to trash", ex);
+        }
+    }
+
+    public void restoreFromTrash(Note note) {
+        if (note == null || note.getId() == null) {
+            return;
+        }
+        String now = now();
+        String sql = """
+                UPDATE notes
+                SET is_trashed = 0,
+                    update_time = ?
+                WHERE id = ?
+                """;
+        try (Connection connection = getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, now);
+            statement.setLong(2, note.getId());
+            statement.executeUpdate();
+        } catch (SQLException ex) {
+            throw new IllegalStateException("Failed to restore note from trash", ex);
         }
     }
 
@@ -235,7 +303,8 @@ public class NoteRepository {
         String now = now();
         String sql = """
                 UPDATE notes
-                SET is_deleted = 1,
+                SET is_trashed = 1,
+                    is_deleted = 1,
                     sync_status = ?,
                     update_time = ?,
                     delete_time = ?
@@ -257,7 +326,8 @@ public class NoteRepository {
         return queryNotes("""
                 SELECT *
                 FROM notes
-                WHERE sync_status IN ('DIRTY', 'DELETE_PENDING')
+                WHERE sync_status = 'DELETE_PENDING'
+                   OR (sync_status = 'DIRTY' AND is_trashed = 0)
                 ORDER BY update_time ASC
                 """);
     }
@@ -276,6 +346,9 @@ public class NoteRepository {
         }
     }
 
+    /**
+     * 根据服务端确认结果回写版本号；若用户在同步期间继续编辑，则保持 DIRTY 以等待下一轮推送。
+     */
     public void markSynced(SyncItemResult item, String expectedUpdateTime) {
         Note current = findByUuid(item.noteUuid());
         if (current == null) {
@@ -306,6 +379,9 @@ public class NoteRepository {
         }
     }
 
+    /**
+     * 应用远端增量变化；若本地仍有未同步修改，则先保留一份冲突副本再覆盖为服务端版本。
+     */
     public void applyRemote(RemoteNote remote) {
         Note existing = findByUuid(remote.noteUuid());
         if (existing != null && existing.getServerVersion() >= remote.serverVersion()) {
@@ -325,6 +401,9 @@ public class NoteRepository {
         }
     }
 
+    /**
+     * 基于当前本地笔记创建冲突副本，保留正文格式和最新本地内容，供用户后续人工处理。
+     */
     public Note createConflictCopy(Note local) {
         Note copy = new Note();
         String now = now();
@@ -337,6 +416,7 @@ public class NoteRepository {
         copy.setPinned(local.isPinned());
         copy.setFavorite(local.isFavorite());
         copy.setArchived(local.isArchived());
+        copy.setTrashed(false);
         copy.setDeleted(false);
         copy.setObjectVersion(0);
         copy.setServerVersion(0);
@@ -347,9 +427,9 @@ public class NoteRepository {
         String sql = """
                 INSERT INTO notes (
                     note_uuid, title, content, content_format, summary, category_name,
-                    is_pinned, is_favorite, is_archived, is_deleted,
+                    is_pinned, is_favorite, is_archived, is_trashed, is_deleted,
                     object_version, server_version, sync_status, create_time, update_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
@@ -366,6 +446,9 @@ public class NoteRepository {
         }
     }
 
+    /**
+     * 用服务端版本覆盖原笔记，和冲突副本配合完成“保留本地修改 + 恢复服务端原件”的策略。
+     */
     public void resolveConflict(SyncConflictItem conflict) {
         if (conflict == null || conflict.serverNote() == null) {
             return;
@@ -378,10 +461,10 @@ public class NoteRepository {
         String sql = """
                 INSERT INTO notes (
                     note_uuid, title, content, content_format, summary, category_name,
-                    is_pinned, is_favorite, is_archived, is_deleted,
+                    is_pinned, is_favorite, is_archived, is_trashed, is_deleted,
                     object_version, server_version, sync_status,
                     create_time, update_time, delete_time, last_sync_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -394,14 +477,15 @@ public class NoteRepository {
             statement.setInt(7, note.isPinned() ? 1 : 0);
             statement.setInt(8, note.isFavorite() ? 1 : 0);
             statement.setInt(9, note.isArchived() ? 1 : 0);
-            statement.setInt(10, note.isDeleted() ? 1 : 0);
-            statement.setLong(11, note.getObjectVersion());
-            statement.setLong(12, note.getServerVersion());
-            statement.setString(13, note.getSyncStatus().name());
-            statement.setString(14, note.getCreateTime());
-            statement.setString(15, note.getUpdateTime());
-            statement.setString(16, note.getDeleteTime());
-            statement.setString(17, note.getLastSyncTime());
+            statement.setInt(10, note.isTrashed() ? 1 : 0);
+            statement.setInt(11, note.isDeleted() ? 1 : 0);
+            statement.setLong(12, note.getObjectVersion());
+            statement.setLong(13, note.getServerVersion());
+            statement.setString(14, note.getSyncStatus().name());
+            statement.setString(15, note.getCreateTime());
+            statement.setString(16, note.getUpdateTime());
+            statement.setString(17, note.getDeleteTime());
+            statement.setString(18, note.getLastSyncTime());
             statement.executeUpdate();
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to insert remote note", ex);
@@ -419,6 +503,7 @@ public class NoteRepository {
                     is_pinned = ?,
                     is_favorite = ?,
                     is_archived = ?,
+                    is_trashed = ?,
                     is_deleted = ?,
                     object_version = ?,
                     server_version = ?,
@@ -440,14 +525,15 @@ public class NoteRepository {
             statement.setInt(6, remote.pinned() ? 1 : 0);
             statement.setInt(7, remote.favorite() ? 1 : 0);
             statement.setInt(8, remote.archived() ? 1 : 0);
-            statement.setInt(9, remote.deleted() ? 1 : 0);
-            statement.setLong(10, remote.objectVersion());
-            statement.setLong(11, remote.serverVersion());
-            statement.setString(12, SyncStatus.SYNCED.name());
-            statement.setString(13, nullToNow(remote.updateTime()));
-            statement.setString(14, remote.deleteTime());
-            statement.setString(15, now());
-            statement.setString(16, remote.noteUuid());
+            statement.setInt(9, 0);
+            statement.setInt(10, remote.deleted() ? 1 : 0);
+            statement.setLong(11, remote.objectVersion());
+            statement.setLong(12, remote.serverVersion());
+            statement.setString(13, SyncStatus.SYNCED.name());
+            statement.setString(14, nullToNow(remote.updateTime()));
+            statement.setString(15, remote.deleteTime());
+            statement.setString(16, now());
+            statement.setString(17, remote.noteUuid());
             statement.executeUpdate();
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to update remote note", ex);
@@ -465,6 +551,7 @@ public class NoteRepository {
         note.setPinned(remote.pinned());
         note.setFavorite(remote.favorite());
         note.setArchived(remote.archived());
+        note.setTrashed(false);
         note.setDeleted(remote.deleted());
         note.setObjectVersion(remote.objectVersion());
         note.setServerVersion(remote.serverVersion());
@@ -483,6 +570,7 @@ public class NoteRepository {
                 JOIN notes ON notes.id = note_fts.rowid
                 WHERE note_fts MATCH ?
                   AND notes.is_deleted = 0
+                  AND notes.is_trashed = 0
                   AND notes.is_archived = 0
                 ORDER BY notes.is_pinned DESC, notes.update_time DESC
                 """;
@@ -498,17 +586,18 @@ public class NoteRepository {
     }
 
     private List<Note> searchLike(String query) {
-        return searchLikeWithWhere(query, "is_deleted = 0 AND is_archived = 0");
+        return searchLikeWithWhere(query, "is_deleted = 0 AND is_trashed = 0 AND is_archived = 0");
     }
 
     private String buildWhereClause(NoteFilter filter, String categoryName) {
         String baseWhere = switch (filter) {
-            case TODAY -> "is_deleted = 0 AND is_archived = 0 AND substr(update_time, 1, 10) = date('now', 'localtime')";
-            case RECENT_7_DAYS -> "is_deleted = 0 AND is_archived = 0 AND substr(update_time, 1, 10) >= date('now', '-7 days', 'localtime')";
-            case FAVORITES -> "is_deleted = 0 AND is_archived = 0 AND is_favorite = 1";
-            case ARCHIVED -> "is_deleted = 0 AND is_archived = 1";
-            case CONFLICT_COPIES -> "is_deleted = 0 AND title LIKE '%" + CONFLICT_COPY_MARKER + "%'";
-            case ALL -> "is_deleted = 0 AND is_archived = 0";
+            case TODAY -> "is_deleted = 0 AND is_trashed = 0 AND is_archived = 0 AND substr(create_time, 1, 10) = date('now', 'localtime')";
+            case RECENT_7_DAYS -> "is_deleted = 0 AND is_trashed = 0 AND is_archived = 0 AND substr(create_time, 1, 10) >= date('now', '-7 days', 'localtime')";
+            case FAVORITES -> "is_deleted = 0 AND is_trashed = 0 AND is_archived = 0 AND is_favorite = 1";
+            case TRASH -> "is_deleted = 0 AND is_trashed = 1";
+            case ARCHIVED -> "is_deleted = 0 AND is_trashed = 0 AND is_archived = 1";
+            case CONFLICT_COPIES -> "is_deleted = 0 AND is_trashed = 0 AND title LIKE '%" + CONFLICT_COPY_MARKER + "%'";
+            case ALL -> "is_deleted = 0 AND is_trashed = 0 AND is_archived = 0";
         };
         if (categoryName == null) {
             return baseWhere;
@@ -588,6 +677,7 @@ public class NoteRepository {
             note.setPinned(resultSet.getInt("is_pinned") == 1);
             note.setFavorite(resultSet.getInt("is_favorite") == 1);
             note.setArchived(resultSet.getInt("is_archived") == 1);
+            note.setTrashed(resultSet.getInt("is_trashed") == 1);
             note.setDeleted(resultSet.getInt("is_deleted") == 1);
             note.setObjectVersion(resultSet.getLong("object_version"));
             note.setServerVersion(resultSet.getLong("server_version"));
@@ -611,12 +701,13 @@ public class NoteRepository {
         statement.setInt(7, note.isPinned() ? 1 : 0);
         statement.setInt(8, note.isFavorite() ? 1 : 0);
         statement.setInt(9, note.isArchived() ? 1 : 0);
-        statement.setInt(10, note.isDeleted() ? 1 : 0);
-        statement.setLong(11, note.getObjectVersion());
-        statement.setLong(12, note.getServerVersion());
-        statement.setString(13, note.getSyncStatus().name());
-        statement.setString(14, note.getCreateTime());
-        statement.setString(15, note.getUpdateTime());
+        statement.setInt(10, note.isTrashed() ? 1 : 0);
+        statement.setInt(11, note.isDeleted() ? 1 : 0);
+        statement.setLong(12, note.getObjectVersion());
+        statement.setLong(13, note.getServerVersion());
+        statement.setString(14, note.getSyncStatus().name());
+        statement.setString(15, note.getCreateTime());
+        statement.setString(16, note.getUpdateTime());
     }
 
     private String normalizeTitle(String title, String content) {
@@ -671,3 +762,4 @@ public class NoteRepository {
         return DriverManager.getConnection("jdbc:sqlite:" + databasePath);
     }
 }
+

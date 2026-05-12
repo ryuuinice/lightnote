@@ -13,7 +13,7 @@ import org.apache.ibatis.annotations.Update;
 public interface NoteMapper {
 
     @Select("""
-            SELECT id, note_uuid, user_id, title, content, summary, category_name,
+            SELECT id, note_uuid, user_id, title, content, content_format, summary, category_name,
                    is_pinned, is_favorite, is_archived, is_deleted,
                    object_version, server_version, create_time, update_time, delete_time
             FROM tbl_note
@@ -24,7 +24,7 @@ public interface NoteMapper {
     List<NoteEntity> findActiveByUserId(@Param("userId") Long userId);
 
     @Select("""
-            SELECT id, note_uuid, user_id, title, content, summary, category_name,
+            SELECT id, note_uuid, user_id, title, content, content_format, summary, category_name,
                    is_pinned, is_favorite, is_archived, is_deleted,
                    object_version, server_version, create_time, update_time, delete_time
             FROM tbl_note
@@ -35,7 +35,7 @@ public interface NoteMapper {
     NoteEntity findByUserIdAndUuid(@Param("userId") Long userId, @Param("noteUuid") String noteUuid);
 
     @Select("""
-            SELECT id, note_uuid, user_id, title, content, summary, category_name,
+            SELECT id, note_uuid, user_id, title, content, content_format, summary, category_name,
                    is_pinned, is_favorite, is_archived, is_deleted,
                    object_version, server_version, create_time, update_time, delete_time
             FROM tbl_note
@@ -48,11 +48,11 @@ public interface NoteMapper {
 
     @Insert("""
             INSERT INTO tbl_note (
-                note_uuid, user_id, title, content, summary, category_name,
+                note_uuid, user_id, title, content, content_format, summary, category_name,
                 is_pinned, is_favorite, is_archived, is_deleted,
                 object_version, server_version, create_time, update_time
             ) VALUES (
-                #{note.noteUuid}, #{note.userId}, #{note.title}, #{note.content}, #{note.summary}, #{note.categoryName},
+                #{note.noteUuid}, #{note.userId}, #{note.title}, #{note.content}, #{note.contentFormat}, #{note.summary}, #{note.categoryName},
                 #{note.isPinned}, #{note.isFavorite}, #{note.isArchived}, #{note.isDeleted},
                 #{note.objectVersion}, #{note.serverVersion}, #{note.createTime}, #{note.updateTime}
             )
@@ -63,6 +63,7 @@ public interface NoteMapper {
             UPDATE tbl_note
             SET title = #{note.title},
                 content = #{note.content},
+                content_format = #{note.contentFormat},
                 summary = #{note.summary},
                 category_name = #{note.categoryName},
                 is_pinned = #{note.isPinned},
@@ -81,6 +82,7 @@ public interface NoteMapper {
             UPDATE tbl_note
             SET title = #{note.title},
                 content = #{note.content},
+                content_format = #{note.contentFormat},
                 summary = #{note.summary},
                 category_name = #{note.categoryName},
                 is_pinned = #{note.isPinned},

@@ -2,6 +2,7 @@ package com.lightnote.client.remote;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.lightnote.client.model.ContentFormat;
 import com.lightnote.client.model.Note;
 import com.lightnote.client.model.SyncStatus;
 import com.lightnote.client.util.HtmlContentSanitizer;
@@ -60,7 +61,8 @@ public class LightNoteApiClient {
         item.put("operation", note.getSyncStatus() == SyncStatus.DELETE_PENDING ? "DELETE" : note.getObjectVersion() == 0 ? "CREATE" : "UPDATE");
         item.put("baseObjectVersion", note.getObjectVersion());
         item.put("title", note.getTitle());
-        item.put("content", HtmlContentSanitizer.normalizeForStorage(note.getContent()));
+        item.put("content", contentForSync(note));
+        item.put("contentFormat", note.getContentFormat().name());
         item.put("summary", note.getSummary());
         item.put("categoryName", note.getCategoryName());
         item.put("pinned", note.isPinned());
@@ -98,6 +100,7 @@ public class LightNoteApiClient {
                 item.path("operation").asText("UPDATE"),
                 item.path("objectVersion").asLong(),
                 item.path("serverVersion").asLong(),
+                item.path("contentFormat").asText(ContentFormat.HTML.name()),
                 item.path("title").asText(""),
                 item.path("content").asText(""),
                 item.path("summary").asText(""),
@@ -110,6 +113,13 @@ public class LightNoteApiClient {
                 textOrNull(item.path("updateTime")),
                 textOrNull(item.path("deleteTime"))
         );
+    }
+
+    private String contentForSync(Note note) {
+        if (note.getContentFormat() == ContentFormat.MARKDOWN) {
+            return note.getContent() == null ? "" : note.getContent();
+        }
+        return HtmlContentSanitizer.normalizeForStorage(note.getContent());
     }
 
     private JsonNode sendJson(String method, String path, String token, Object body) {

@@ -56,6 +56,7 @@ public interface SyncLogMapper {
                    n.note_uuid,
                    n.title,
                    n.content,
+                   n.content_format,
                    n.summary,
                    n.category_name,
                    n.is_pinned,

@@ -9,6 +9,7 @@ public class NoteEntity {
     private Long userId;
     private String title;
     private String content;
+    private String contentFormat;
     private String summary;
     private String categoryName;
     private Integer isPinned;
@@ -59,6 +60,14 @@ public class NoteEntity {
 
     public void setContent(String content) {
         this.content = content;
+    }
+
+    public String getContentFormat() {
+        return contentFormat;
+    }
+
+    public void setContentFormat(String contentFormat) {
+        this.contentFormat = contentFormat;
     }
 
     public String getSummary() {

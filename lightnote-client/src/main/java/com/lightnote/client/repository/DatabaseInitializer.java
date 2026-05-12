@@ -12,7 +12,7 @@ import java.sql.Statement;
 
 public class DatabaseInitializer {
 
-    private static final int CURRENT_SCHEMA_VERSION = 1;
+    private static final int CURRENT_SCHEMA_VERSION = 2;
 
     private Path dataDirectory;
     private Path databasePath;
@@ -59,6 +59,7 @@ public class DatabaseInitializer {
                             note_uuid TEXT NOT NULL UNIQUE,
                             title TEXT NOT NULL,
                             content TEXT,
+                            content_format TEXT NOT NULL DEFAULT 'HTML',
                             summary TEXT,
                             category_name TEXT,
                             is_pinned INTEGER NOT NULL DEFAULT 0,
@@ -153,7 +154,25 @@ public class DatabaseInitializer {
                 initializationLog.add("执行迁移 v1: 建立基线 schema 版本");
                 statement.executeUpdate("PRAGMA user_version = 1");
             }
+            case 2 -> {
+                initializationLog.add("执行迁移 v2: 增加正文格式字段");
+                if (!columnExists(statement, "notes", "content_format")) {
+                    statement.executeUpdate("ALTER TABLE notes ADD COLUMN content_format TEXT NOT NULL DEFAULT 'HTML'");
+                }
+                statement.executeUpdate("PRAGMA user_version = 2");
+            }
             default -> throw new IllegalStateException("Unsupported schema version: " + targetVersion);
+        }
+    }
+
+    private boolean columnExists(Statement statement, String tableName, String columnName) throws SQLException {
+        try (ResultSet resultSet = statement.executeQuery("PRAGMA table_info(" + tableName + ")")) {
+            while (resultSet.next()) {
+                if (columnName.equalsIgnoreCase(resultSet.getString("name"))) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 

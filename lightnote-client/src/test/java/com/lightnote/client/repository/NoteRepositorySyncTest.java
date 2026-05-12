@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 
+import com.lightnote.client.model.ContentFormat;
 import com.lightnote.client.model.Note;
 import com.lightnote.client.model.NoteFilter;
 import com.lightnote.client.model.SyncStatus;
@@ -360,6 +361,7 @@ class NoteRepositorySyncTest {
     @Test
     void saveNormalizesEscapedHtmlBeforeSyncReadsIt() {
         Note note = repository.createEmpty();
+        note.setContentFormat(ContentFormat.HTML);
         note.setTitle("Rich");
         note.setContent("&lt;html&gt;&lt;body&gt;&lt;span style=\"font-weight: bold\"&gt;Hello&lt;/span&gt;&lt;/body&gt;&lt;/html&gt;");
 
@@ -370,5 +372,57 @@ class NoteRepositorySyncTest {
         assertEquals("<span style=\"font-weight: bold\">Hello</span>", stored.getContent());
         assertEquals("Hello", stored.getSummary());
         assertEquals("<span style=\"font-weight: bold\">Hello</span>", repository.listPendingSync().get(0).getContent());
+    }
+
+    @Test
+    void markdownContentIsStoredWithoutHtmlNormalization() {
+        Note note = repository.createEmpty();
+        note.setContentFormat(ContentFormat.MARKDOWN);
+        note.setTitle("Markdown");
+        note.setContent("""
+                # Heading
+
+                Keep <literal> tags & symbols.
+
+                - **bold item**
+                """);
+
+        repository.save(note);
+
+        Note stored = repository.findByUuid(note.getNoteUuid());
+        assertNotNull(stored);
+        assertEquals(ContentFormat.MARKDOWN, stored.getContentFormat());
+        assertEquals(note.getContent(), stored.getContent());
+        assertEquals("Heading Keep <literal> tags & symbols. bold item", stored.getSummary());
+    }
+
+    @Test
+    void applyRemotePreservesMarkdownFormat() {
+        Note note = repository.createEmpty();
+
+        repository.applyRemote(new RemoteNote(
+                note.getNoteUuid(),
+                "UPDATE",
+                2L,
+                8L,
+                "MARKDOWN",
+                "Remote Markdown",
+                "# Remote\n\n![Alt](lightnote-asset://asset-1)",
+                "",
+                "",
+                false,
+                false,
+                false,
+                false,
+                "2026-05-08T10:00:00",
+                "2026-05-08T10:20:00",
+                null
+        ));
+
+        Note updated = repository.findByUuid(note.getNoteUuid());
+        assertNotNull(updated);
+        assertEquals(ContentFormat.MARKDOWN, updated.getContentFormat());
+        assertEquals("# Remote\n\n![Alt](lightnote-asset://asset-1)", updated.getContent());
+        assertEquals("Remote Alt", updated.getSummary());
     }
 }

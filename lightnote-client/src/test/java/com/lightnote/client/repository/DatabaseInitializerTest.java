@@ -39,7 +39,7 @@ class DatabaseInitializerTest {
     }
 
     @Test
-    void initializeRecordsDatabaseSetupLog() throws IOException {
+    void initializeRecordsDatabaseSetupLog() throws Exception {
         tempDir = Files.createTempDirectory("lightnote-db-init");
         System.setProperty("lightnote.dataDir", tempDir.toString());
 
@@ -52,6 +52,8 @@ class DatabaseInitializerTest {
         assertFalse(initializer.initializationLog().isEmpty());
         assertTrue(initializer.initializationLog().stream().anyMatch(line -> line.contains("已确认 notes 表")));
         assertTrue(initializer.initializationLog().stream().anyMatch(line -> line.contains("执行迁移 v1")));
+        assertTrue(initializer.initializationLog().stream().anyMatch(line -> line.contains("执行迁移 v2")));
+        assertTrue(columnExists(initializer.getDatabasePath(), "notes", "content_format"));
     }
 
     @Test
@@ -83,7 +85,7 @@ class DatabaseInitializerTest {
         second.initialize();
 
         assertTrue(second.initializationLog().stream().anyMatch(line -> line.contains("数据库无需迁移")));
-        assertEquals(1, readUserVersion(second.getDatabasePath()));
+        assertEquals(2, readUserVersion(second.getDatabasePath()));
     }
 
     private int readUserVersion(Path databasePath) throws Exception {
@@ -91,6 +93,19 @@ class DatabaseInitializerTest {
              Statement statement = connection.createStatement();
              ResultSet resultSet = statement.executeQuery("PRAGMA user_version")) {
             return resultSet.next() ? resultSet.getInt(1) : 0;
+        }
+    }
+
+    private boolean columnExists(Path databasePath, String tableName, String columnName) throws Exception {
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + databasePath);
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("PRAGMA table_info(" + tableName + ")")) {
+            while (resultSet.next()) {
+                if (columnName.equalsIgnoreCase(resultSet.getString("name"))) {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 }

@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.lightnote.client.model.ContentFormat;
 import com.lightnote.client.model.Note;
 import com.lightnote.client.model.SyncStatus;
 import com.sun.net.httpserver.HttpExchange;
@@ -111,12 +112,14 @@ class LightNoteApiClientTest {
         assertEquals("Bearer jwt-2", auth.get());
         assertTrue(body.get().contains("\"operation\":\"DELETE\""));
         assertTrue(body.get().contains("\"baseObjectVersion\":2"));
+        assertTrue(body.get().contains("\"contentFormat\":\"HTML\""));
         assertEquals(15L, response.serverVersion());
         assertEquals(1, response.successItems().size());
         assertEquals(1, response.conflictItems().size());
         assertEquals("note-2", response.conflictItems().get(0).noteUuid());
         assertEquals(4L, response.conflictItems().get(0).serverObjectVersion());
         assertEquals("server", response.conflictItems().get(0).serverNote().title());
+        assertEquals("HTML", response.conflictItems().get(0).serverNote().contentFormat());
     }
 
     @Test
@@ -154,6 +157,43 @@ class LightNoteApiClientTest {
         assertTrue(body.get().contains("<span style=\\\"font-weight: bold\\\">Hello</span>"));
         assertFalse(body.get().contains("&lt;html"));
         assertFalse(body.get().contains("<html"));
+    }
+
+    @Test
+    void pushKeepsMarkdownContentRaw() throws Exception {
+        AtomicReference<String> body = new AtomicReference<>();
+        server = startServer(exchange -> {
+            body.set(readBody(exchange));
+            writeJson(exchange, 200, """
+                    {
+                      "code": 0,
+                      "message": "success",
+                      "data": {
+                        "serverVersion": 9,
+                        "successItems": [
+                          {"noteUuid":"note-md","objectVersion":1,"serverVersion":9}
+                        ],
+                        "conflictItems": []
+                      }
+                    }
+                    """);
+        });
+
+        Note note = new Note();
+        note.setNoteUuid("note-md");
+        note.setTitle("Markdown");
+        note.setContentFormat(ContentFormat.MARKDOWN);
+        note.setContent("# Title\\n\\nKeep <literal> tags");
+        note.setSummary("Title Keep <literal> tags");
+        note.setSyncStatus(SyncStatus.DIRTY);
+        note.setUpdateTime("2026-05-08T11:00:00");
+
+        LightNoteApiClient client = new LightNoteApiClient(baseUrl());
+        client.push("jwt-md", 8L, List.of(note));
+
+        assertNotNull(body.get());
+        assertTrue(body.get().contains("\"contentFormat\":\"MARKDOWN\""));
+        assertTrue(body.get().contains("Keep <literal> tags"));
     }
 
     @Test
@@ -206,6 +246,7 @@ class LightNoteApiClientTest {
         assertFalse(response.hasMore());
         assertEquals(1, response.notes().size());
         assertTrue(response.notes().get(0).deleted());
+        assertEquals("HTML", response.notes().get(0).contentFormat());
         assertEquals("2026-05-08T09:31:00", response.notes().get(0).deleteTime());
 
         server.removeContext("/");

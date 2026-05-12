@@ -397,6 +397,66 @@
     -fx-font-size: 12px;
 }
 
+.markdown-split-pane {
+    -fx-background-color: #ffffff;
+    -fx-border-color: #edf1f6;
+    -fx-border-radius: 8;
+    -fx-background-radius: 8;
+    -fx-padding: 0;
+}
+
+.markdown-split-pane .split-pane-divider {
+    -fx-background-color: #edf1f6;
+    -fx-padding: 0 1 0 1;
+}
+
+.markdown-editor {
+    -fx-background-color: #ffffff;
+    -fx-border-color: transparent;
+    -fx-background-radius: 8;
+    -fx-border-radius: 8;
+    -fx-control-inner-background: #ffffff;
+    -fx-font-family: "Cascadia Mono", "JetBrains Mono", "Consolas", monospace;
+    -fx-font-size: 14px;
+    -fx-text-fill: #223046;
+    -fx-highlight-fill: #dfe8ff;
+    -fx-highlight-text-fill: #152033;
+    -fx-padding: 16 18;
+}
+
+.markdown-editor .content {
+    -fx-background-color: #ffffff;
+}
+
+.markdown-preview {
+    -fx-background-color: #ffffff;
+}
+
+.editor-mode-switch {
+    -fx-padding: 0 0 2 0;
+    -fx-alignment: center-left;
+}
+
+.mode-button {
+    -fx-background-color: #f2f6fb;
+    -fx-text-fill: #64748b;
+    -fx-background-radius: 999;
+    -fx-border-radius: 999;
+    -fx-padding: 5 12;
+    -fx-font-size: 12px;
+    -fx-border-color: transparent;
+}
+
+.mode-button:hover {
+    -fx-background-color: #e8eef7;
+}
+
+.mode-button.mode-button-active {
+    -fx-background-color: #e7edff;
+    -fx-text-fill: #3158d4;
+    -fx-border-color: #b9c7ff;
+}
+
 .rich-editor {
     -fx-background-color: #ffffff;
     -fx-border-color: transparent;

@@ -12,6 +12,8 @@ import com.lightnote.server.entity.NoteEntity;
 import com.lightnote.server.entity.SyncChangeEntity;
 import com.lightnote.server.mapper.NoteMapper;
 import com.lightnote.server.mapper.SyncLogMapper;
+import com.lightnote.server.model.ContentFormat;
+import com.lightnote.server.util.ContentTextExtractor;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -195,7 +197,8 @@ public class SyncService {
     private void applyClientFields(NoteEntity note, SyncNoteRequest item) {
         note.setTitle(item.title() == null || item.title().isBlank() ? "未命名笔记" : item.title());
         note.setContent(item.content());
-        note.setSummary(normalizeSummary(item.summary(), item.content()));
+        note.setContentFormat(normalizeContentFormat(item.contentFormat(), ContentFormat.from(note.getContentFormat())).name());
+        note.setSummary(normalizeSummary(item.summary(), item.content(), note.getContentFormat()));
         note.setCategoryName(item.categoryName());
         note.setIsPinned(toInt(item.pinned()));
         note.setIsFavorite(toInt(item.favorite()));
@@ -210,6 +213,7 @@ public class SyncService {
                 row.getLogServerVersion(),
                 row.getTitle(),
                 row.getContent(),
+                normalizeContentFormat(row.getContentFormat(), ContentFormat.HTML).name(),
                 row.getSummary(),
                 row.getCategoryName(),
                 row.getIsPinned() == 1,
@@ -227,6 +231,7 @@ public class SyncService {
                 note.getNoteUuid(),
                 note.getTitle(),
                 note.getContent(),
+                normalizeContentFormat(note.getContentFormat(), ContentFormat.HTML).name(),
                 note.getSummary(),
                 note.getCategoryName(),
                 note.getIsPinned() == 1,
@@ -245,14 +250,21 @@ public class SyncService {
         return Boolean.TRUE.equals(value) ? 1 : 0;
     }
 
-    private String normalizeSummary(String summary, String content) {
+    private ContentFormat normalizeContentFormat(String contentFormat, ContentFormat fallback) {
+        if (contentFormat == null || contentFormat.isBlank()) {
+            return fallback == null ? ContentFormat.HTML : fallback;
+        }
+        return ContentFormat.from(contentFormat);
+    }
+
+    private String normalizeSummary(String summary, String content, String contentFormat) {
         if (summary != null && !summary.isBlank()) {
             return limit(summary.strip(), 512);
         }
         if (content == null || content.isBlank()) {
             return "";
         }
-        return limit(content.strip().replaceAll("\\s+", " "), 200);
+        return limit(ContentTextExtractor.toPlainText(content, contentFormat), 200);
     }
 
     private String limit(String value, int maxLength) {

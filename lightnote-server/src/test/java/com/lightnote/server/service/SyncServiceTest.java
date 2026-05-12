@@ -79,6 +79,7 @@ class SyncServiceTest {
         assertEquals("未命名笔记", inserted.getTitle());
         assertEquals("hello world", inserted.getSummary());
         assertEquals("  hello\n   world  ", inserted.getContent());
+        assertEquals("HTML", inserted.getContentFormat());
         assertEquals("work", inserted.getCategoryName());
         assertEquals(1, inserted.getIsPinned());
         assertEquals(0, inserted.getIsFavorite());
@@ -91,10 +92,41 @@ class SyncServiceTest {
     }
 
     @Test
+    void pushCreatesMarkdownNoteAndBuildsPlainSummary() {
+        SyncNoteRequest note = new SyncNoteRequest(
+                "note-md",
+                "create",
+                0L,
+                "Markdown",
+                "# Heading\n\nKeep <literal> tags\n\n- **bold item**",
+                "MARKDOWN",
+                null,
+                "",
+                false,
+                false,
+                false,
+                false,
+                "2026-05-08T10:00:00"
+        );
+        when(noteMapper.findByUserIdAndUuidForUpdate(7L, "note-md")).thenReturn(null);
+        when(serverVersionService.nextServerVersion()).thenReturn(12L);
+        when(syncLogMapper.getCurrentServerVersion()).thenReturn(12L);
+
+        syncService.push(7L, new SyncPushRequest(5L, List.of(note)));
+
+        verify(noteMapper).insert(noteCaptor.capture());
+        NoteEntity inserted = noteCaptor.getValue();
+        assertEquals("MARKDOWN", inserted.getContentFormat());
+        assertEquals("# Heading\n\nKeep <literal> tags\n\n- **bold item**", inserted.getContent());
+        assertEquals("Heading Keep <literal> tags bold item", inserted.getSummary());
+    }
+
+    @Test
     void pushReturnsConflictWithoutOverwritingServerNote() {
         NoteEntity current = new NoteEntity();
         current.setNoteUuid("note-2");
         current.setTitle("server");
+        current.setContentFormat("MARKDOWN");
         current.setObjectVersion(4L);
         current.setServerVersion(9L);
         current.setIsPinned(0);
@@ -130,6 +162,7 @@ class SyncServiceTest {
         assertEquals(3L, response.conflictItems().get(0).clientBaseObjectVersion());
         assertEquals(4L, response.conflictItems().get(0).serverObjectVersion());
         assertEquals("server", response.conflictItems().get(0).serverNote().title());
+        assertEquals("MARKDOWN", response.conflictItems().get(0).serverNote().contentFormat());
         verify(noteMapper, never()).updateFromSync(any());
         verify(syncLogMapper, never()).insertLog(eq(7L), eq("NOTE"), eq("note-2"), eq("UPDATE"), any(Long.class), any(LocalDateTime.class));
         verify(serverVersionService, never()).nextServerVersion();
@@ -179,6 +212,7 @@ class SyncServiceTest {
         first.setObjectVersion(2L);
         first.setLogServerVersion(8L);
         first.setTitle("First");
+        first.setContentFormat("MARKDOWN");
         first.setIsPinned(0);
         first.setIsFavorite(0);
         first.setIsArchived(0);
@@ -210,6 +244,7 @@ class SyncServiceTest {
         SyncChangeNote note = response.notes().get(0);
         assertEquals("note-1", note.noteUuid());
         assertEquals("UPDATE", note.operation());
+        assertEquals("MARKDOWN", note.contentFormat());
         assertFalse(note.deleted());
     }
 }

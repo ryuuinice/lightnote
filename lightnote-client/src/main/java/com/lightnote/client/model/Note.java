@@ -6,6 +6,7 @@ public class Note {
     private String noteUuid;
     private String title;
     private String content;
+    private ContentFormat contentFormat = ContentFormat.HTML;
     private String summary;
     private String categoryName;
     private boolean pinned;
@@ -50,6 +51,14 @@ public class Note {
 
     public void setContent(String content) {
         this.content = content;
+    }
+
+    public ContentFormat getContentFormat() {
+        return contentFormat == null ? ContentFormat.HTML : contentFormat;
+    }
+
+    public void setContentFormat(ContentFormat contentFormat) {
+        this.contentFormat = contentFormat == null ? ContentFormat.HTML : contentFormat;
     }
 
     public String getSummary() {

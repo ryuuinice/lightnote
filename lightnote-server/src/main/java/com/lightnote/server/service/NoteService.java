@@ -7,6 +7,8 @@ import com.lightnote.server.entity.NoteEntity;
 import com.lightnote.server.exception.BusinessException;
 import com.lightnote.server.mapper.NoteMapper;
 import com.lightnote.server.mapper.SyncLogMapper;
+import com.lightnote.server.model.ContentFormat;
+import com.lightnote.server.util.ContentTextExtractor;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
@@ -50,7 +52,8 @@ public class NoteService {
         note.setUserId(userId);
         note.setTitle(request.title());
         note.setContent(request.content());
-        note.setSummary(normalizeSummary(request.summary(), request.content()));
+        note.setContentFormat(normalizeContentFormat(request.contentFormat(), ContentFormat.HTML).name());
+        note.setSummary(normalizeSummary(request.summary(), request.content(), note.getContentFormat()));
         note.setCategoryName(request.categoryName());
         note.setIsPinned(toInt(request.pinned()));
         note.setIsFavorite(toInt(request.favorite()));
@@ -77,7 +80,8 @@ public class NoteService {
         long serverVersion = serverVersionService.nextServerVersion();
         current.setTitle(request.title());
         current.setContent(request.content());
-        current.setSummary(normalizeSummary(request.summary(), request.content()));
+        current.setContentFormat(normalizeContentFormat(request.contentFormat(), ContentFormat.from(current.getContentFormat())).name());
+        current.setSummary(normalizeSummary(request.summary(), request.content(), current.getContentFormat()));
         current.setCategoryName(request.categoryName());
         current.setIsPinned(toInt(request.pinned()));
         current.setIsFavorite(toInt(request.favorite()));
@@ -116,6 +120,7 @@ public class NoteService {
                 note.getNoteUuid(),
                 note.getTitle(),
                 note.getContent(),
+                normalizeContentFormat(note.getContentFormat(), ContentFormat.HTML).name(),
                 note.getSummary(),
                 note.getCategoryName(),
                 note.getIsPinned() == 1,
@@ -134,14 +139,22 @@ public class NoteService {
         return Boolean.TRUE.equals(value) ? 1 : 0;
     }
 
-    private String normalizeSummary(String summary, String content) {
+    private ContentFormat normalizeContentFormat(String contentFormat, ContentFormat fallback) {
+        ContentFormat normalized = ContentFormat.from(contentFormat);
+        if (contentFormat == null || contentFormat.isBlank()) {
+            return fallback == null ? ContentFormat.HTML : fallback;
+        }
+        return normalized;
+    }
+
+    private String normalizeSummary(String summary, String content, String contentFormat) {
         if (summary != null && !summary.isBlank()) {
             return limit(summary.strip(), 512);
         }
         if (content == null || content.isBlank()) {
             return "";
         }
-        return limit(content.strip().replaceAll("\\s+", " "), 200);
+        return limit(ContentTextExtractor.toPlainText(content, contentFormat), 200);
     }
 
     private String limit(String value, int maxLength) {

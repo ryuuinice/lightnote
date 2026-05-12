@@ -1,5 +1,6 @@
 package com.lightnote.client.ui;
 
+import com.lightnote.client.model.ContentFormat;
 import com.lightnote.client.model.Note;
 import com.lightnote.client.model.NoteFilter;
 import com.lightnote.client.repository.AppConfigRepository;
@@ -9,6 +10,8 @@ import com.lightnote.client.sync.ClientSyncService;
 import com.lightnote.client.util.AppLogger;
 import com.lightnote.client.util.HtmlContentSanitizer;
 import com.lightnote.client.util.HtmlTextExtractor;
+import com.lightnote.client.util.MarkdownRenderer;
+import com.lightnote.client.util.MarkdownTextExtractor;
 import javafx.application.Platform;
 import java.util.EnumMap;
 import java.util.HashMap;
@@ -26,7 +29,6 @@ import javafx.scene.Parent;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
-import javafx.scene.control.Control;
 import javafx.scene.control.ContentDisplay;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
@@ -34,9 +36,9 @@ import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
+import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TextInputDialog;
-import javafx.scene.control.ToolBar;
 import javafx.scene.control.Tooltip;
 import javafx.scene.Node;
 import javafx.scene.layout.BorderPane;
@@ -44,7 +46,7 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
-import javafx.scene.web.HTMLEditor;
+import javafx.scene.web.WebView;
 import javafx.scene.text.Text;
 import javafx.scene.text.TextFlow;
 import javafx.stage.Window;
@@ -57,6 +59,12 @@ public class MainView {
     private static final String NOTE_EDITOR_DIVIDER_KEY = "note_editor_divider_position";
     private static final String CONFLICT_COPY_MARKER = "冲突副本";
     private static final String UNCATEGORIZED_LABEL = "未分类";
+
+    private enum EditorMode {
+        EDIT,
+        SPLIT,
+        PREVIEW
+    }
 
     private static final String EDITOR_STYLE = """
             <style id="lightnote-editor-style">
@@ -140,7 +148,12 @@ public class MainView {
     private final Button clearSearchButton = new Button("清空");
     private final TextField titleField = new TextField();
     private final ComboBox<String> categoryBox = new ComboBox<>();
-    private final HTMLEditor contentEditor = new HTMLEditor();
+    private final TextArea contentEditor = new TextArea();
+    private final WebView previewPane = new WebView();
+    private final SplitPane markdownSplitPane = new SplitPane();
+    private final Button editModeButton = new Button("编辑");
+    private final Button splitModeButton = new Button("分屏");
+    private final Button previewModeButton = new Button("预览");
     private final Button syncButton = new Button("同步");
     private final CheckBox pinnedBox = new CheckBox("置顶");
     private final CheckBox favoriteBox = new CheckBox("收藏");
@@ -177,6 +190,7 @@ public class MainView {
     private String lastLocalFailureMessage;
     private NoteFilter currentFilter = NoteFilter.ALL;
     private String currentCategoryName;
+    private EditorMode editorMode = EditorMode.SPLIT;
 
     public MainView(
             NoteRepository noteRepository,
@@ -358,14 +372,26 @@ public class MainView {
         categoryBox.getStyleClass().add("category-field");
         categoryBox.setVisibleRowCount(10);
 
-        contentEditor.getStyleClass().add("rich-editor");
+        contentEditor.setPromptText("用 Markdown 记录想法、命令、清单或代码片段...");
+        contentEditor.setWrapText(true);
+        contentEditor.getStyleClass().add("markdown-editor");
         contentEditor.setPrefHeight(620);
-        contentEditor.sceneProperty().addListener((obs, oldScene, newScene) -> {
-            if (newScene != null) {
-                Platform.runLater(this::configureEditorToolbar);
-            }
-        });
-        VBox.setVgrow(contentEditor, Priority.ALWAYS);
+        previewPane.getStyleClass().add("markdown-preview");
+        previewPane.setContextMenuEnabled(false);
+        markdownSplitPane.getItems().setAll(contentEditor, previewPane);
+        markdownSplitPane.setDividerPositions(0.52);
+        markdownSplitPane.getStyleClass().add("markdown-split-pane");
+        VBox.setVgrow(markdownSplitPane, Priority.ALWAYS);
+
+        editModeButton.getStyleClass().add("mode-button");
+        splitModeButton.getStyleClass().add("mode-button");
+        previewModeButton.getStyleClass().add("mode-button");
+        editModeButton.setOnAction(event -> setEditorMode(EditorMode.EDIT));
+        splitModeButton.setOnAction(event -> setEditorMode(EditorMode.SPLIT));
+        previewModeButton.setOnAction(event -> setEditorMode(EditorMode.PREVIEW));
+        HBox editorModes = new HBox(6, editModeButton, splitModeButton, previewModeButton);
+        editorModes.getStyleClass().add("editor-mode-switch");
+        setEditorMode(editorMode);
 
         Button saveButton = new Button("保存");
         saveButton.getStyleClass().add("ghost-button");
@@ -397,10 +423,10 @@ public class MainView {
         footer.setAlignment(Pos.CENTER_LEFT);
         footer.getStyleClass().add("document-footer");
 
-        VBox document = new VBox(12, topLine, titleField, meta, contentEditor, footer);
+        VBox document = new VBox(12, topLine, titleField, meta, editorModes, markdownSplitPane, footer);
         document.setMaxWidth(980);
         document.getStyleClass().add("document-surface");
-        VBox.setVgrow(contentEditor, Priority.ALWAYS);
+        VBox.setVgrow(markdownSplitPane, Priority.ALWAYS);
 
         VBox editor = new VBox(document);
         editor.setMinWidth(420);
@@ -426,8 +452,10 @@ public class MainView {
         autoSyncDelay.setOnFinished(event -> autoSyncNow());
         titleField.textProperty().addListener((obs, oldValue, newValue) -> scheduleAutosave());
         categoryBox.getEditor().textProperty().addListener((obs, oldValue, newValue) -> scheduleAutosave());
-        contentEditor.setOnKeyReleased(event -> scheduleAutosave());
-        contentEditor.setOnMouseReleased(event -> scheduleAutosave());
+        contentEditor.textProperty().addListener((obs, oldValue, newValue) -> {
+            refreshMarkdownPreview();
+            scheduleAutosave();
+        });
         pinnedBox.selectedProperty().addListener((obs, oldValue, newValue) -> saveToggleChange());
         favoriteBox.selectedProperty().addListener((obs, oldValue, newValue) -> saveToggleChange());
         archivedBox.selectedProperty().addListener((obs, oldValue, newValue) -> saveToggleChange());
@@ -666,115 +694,6 @@ public class MainView {
         return dialog;
     }
 
-    private void configureEditorToolbar() {
-        for (Node toolbarNode : contentEditor.lookupAll(".tool-bar")) {
-            if (!(toolbarNode instanceof ToolBar toolBar)) {
-                continue;
-            }
-            toolBar.getItems().forEach(this::customizeEditorToolbarNode);
-            normalizeToolbarSeparators(toolBar);
-        }
-    }
-
-    private void customizeEditorToolbarNode(Node node) {
-        if (hasAnyStyleClass(node,
-                "html-editor-cut",
-                "html-editor-copy",
-                "html-editor-paste",
-                "html-editor-indent",
-                "html-editor-outdent",
-                "html-editor-hr")) {
-            hideEditorToolbarNode(node);
-            return;
-        }
-        if (hasAnyStyleClass(node, "font-menu-button")) {
-            node.getStyleClass().add("editor-font-family");
-            applyEditorTooltip(node, "字体");
-            return;
-        }
-        if (hasAnyStyleClass(node, "font-size-menu-button")) {
-            node.getStyleClass().add("editor-font-size");
-            applyEditorTooltip(node, "字号");
-            return;
-        }
-        if (hasAnyStyleClass(node, "html-editor-bold")) {
-            applyEditorTooltip(node, "加粗");
-        } else if (hasAnyStyleClass(node, "html-editor-italic")) {
-            applyEditorTooltip(node, "斜体");
-        } else if (hasAnyStyleClass(node, "html-editor-underline")) {
-            applyEditorTooltip(node, "下划线");
-        } else if (hasAnyStyleClass(node, "html-editor-strike")) {
-            applyEditorTooltip(node, "删除线");
-        } else if (hasAnyStyleClass(node, "html-editor-foreground")) {
-            applyEditorTooltip(node, "文字颜色");
-        } else if (hasAnyStyleClass(node, "html-editor-background")) {
-            applyEditorTooltip(node, "高亮");
-        } else if (hasAnyStyleClass(node, "html-editor-bullets")) {
-            applyEditorTooltip(node, "无序列表");
-        } else if (hasAnyStyleClass(node, "html-editor-numbers")) {
-            applyEditorTooltip(node, "有序列表");
-        } else if (hasAnyStyleClass(node, "html-editor-align-left")) {
-            applyEditorTooltip(node, "左对齐");
-        } else if (hasAnyStyleClass(node, "html-editor-align-center")) {
-            applyEditorTooltip(node, "居中");
-        } else if (hasAnyStyleClass(node, "html-editor-align-right")) {
-            applyEditorTooltip(node, "右对齐");
-        } else if (hasAnyStyleClass(node, "html-editor-align-justify")) {
-            applyEditorTooltip(node, "两端对齐");
-        }
-    }
-
-    private void normalizeToolbarSeparators(ToolBar toolBar) {
-        boolean previousVisible = false;
-        for (Node item : toolBar.getItems()) {
-            if (!(item instanceof Separator)) {
-                previousVisible = item.isManaged();
-                continue;
-            }
-            boolean nextVisible = hasVisibleToolbarItemAfter(toolBar, item);
-            boolean shouldShow = previousVisible && nextVisible;
-            item.setManaged(shouldShow);
-            item.setVisible(shouldShow);
-            previousVisible = shouldShow;
-        }
-    }
-
-    private boolean hasVisibleToolbarItemAfter(ToolBar toolBar, Node current) {
-        boolean seenCurrent = false;
-        for (Node item : toolBar.getItems()) {
-            if (!seenCurrent) {
-                if (item == current) {
-                    seenCurrent = true;
-                }
-                continue;
-            }
-            if (!(item instanceof Separator) && item.isManaged()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void hideEditorToolbarNode(Node node) {
-        node.setManaged(false);
-        node.setVisible(false);
-    }
-
-    private void applyEditorTooltip(Node node, String text) {
-        if (node instanceof Control control) {
-            control.setTooltip(new Tooltip(text));
-        }
-    }
-
-    private boolean hasAnyStyleClass(Node node, String... styleClasses) {
-        for (String styleClass : styleClasses) {
-            if (node.getStyleClass().contains(styleClass)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private void refreshNotes() {
         try {
             Note selected = selectedNote;
@@ -904,7 +823,9 @@ public class MainView {
             titleField.clear();
             categoryBox.getSelectionModel().clearSelection();
             categoryBox.getEditor().clear();
-            contentEditor.setHtmlText(toEditorHtml(""));
+            contentEditor.clear();
+            contentEditor.setEditable(true);
+            refreshMarkdownPreview();
             pinnedBox.setSelected(false);
             favoriteBox.setSelected(false);
             archivedBox.setSelected(false);
@@ -915,7 +836,9 @@ public class MainView {
             setEditorDisabled(false);
             titleField.setText(nullToEmpty(note.getTitle()));
             applyCategoryEditorValue(note.getCategoryName());
-            contentEditor.setHtmlText(toEditorHtml(note.getContent()));
+            contentEditor.setText(editorTextForNote(note));
+            contentEditor.setEditable(note.getContentFormat() == ContentFormat.MARKDOWN);
+            refreshMarkdownPreview();
             pinnedBox.setSelected(note.isPinned());
             favoriteBox.setSelected(note.isFavorite());
             archivedBox.setSelected(note.isArchived());
@@ -929,6 +852,10 @@ public class MainView {
         titleField.setDisable(disabled);
         categoryBox.setDisable(disabled);
         contentEditor.setDisable(disabled);
+        previewPane.setDisable(disabled);
+        editModeButton.setDisable(disabled);
+        splitModeButton.setDisable(disabled);
+        previewModeButton.setDisable(disabled);
         pinnedBox.setDisable(disabled);
         favoriteBox.setDisable(disabled);
         archivedBox.setDisable(disabled);
@@ -956,14 +883,14 @@ public class MainView {
         boolean titleChanged = !nullToEmpty(selectedNote.getTitle()).equals(nullToEmpty(titleField.getText()));
         boolean categoryChanged = !nullToEmpty(normalizeCategoryName(selectedNote.getCategoryName()))
                 .equals(nullToEmpty(normalizeCategoryName(categoryBox.getEditor().getText())));
-        boolean contentChanged = !nullToEmpty(selectedNote.getContent())
-                .equals(nullToEmpty(sanitizeEditorHtml(contentEditor.getHtmlText())));
+        String editorContent = editorContentForSave(selectedNote);
+        boolean contentChanged = !nullToEmpty(selectedNote.getContent()).equals(nullToEmpty(editorContent));
         boolean pinnedChanged = selectedNote.isPinned() != pinnedBox.isSelected();
         boolean favoriteChanged = selectedNote.isFavorite() != favoriteBox.isSelected();
         boolean archivedChanged = selectedNote.isArchived() != archivedBox.isSelected();
         selectedNote.setTitle(titleField.getText());
         selectedNote.setCategoryName(categoryBox.getEditor().getText());
-        selectedNote.setContent(sanitizeEditorHtml(contentEditor.getHtmlText()));
+        selectedNote.setContent(editorContent);
         selectedNote.setPinned(pinnedBox.isSelected());
         selectedNote.setFavorite(favoriteBox.isSelected());
         selectedNote.setArchived(archivedBox.isSelected());
@@ -1002,6 +929,60 @@ public class MainView {
         }
         autosaveDelay.stop();
         saveSelectedNote();
+    }
+
+    private String editorContentForSave(Note note) {
+        if (note != null && note.getContentFormat() == ContentFormat.HTML) {
+            return note.getContent();
+        }
+        return contentEditor.getText();
+    }
+
+    private String editorTextForNote(Note note) {
+        if (note == null || note.getContent() == null) {
+            return "";
+        }
+        if (note.getContentFormat() == ContentFormat.MARKDOWN) {
+            return note.getContent();
+        }
+        return HtmlTextExtractor.toPlainText(note.getContent());
+    }
+
+    private void refreshMarkdownPreview() {
+        if (selectedNote == null) {
+            previewPane.getEngine().loadContent(MarkdownRenderer.renderDocument(""));
+            return;
+        }
+        if (selectedNote.getContentFormat() == ContentFormat.HTML) {
+            previewPane.getEngine().loadContent(toEditorHtml(selectedNote.getContent()));
+            return;
+        }
+        previewPane.getEngine().loadContent(MarkdownRenderer.renderDocument(contentEditor.getText()));
+    }
+
+    private void setEditorMode(EditorMode mode) {
+        editorMode = mode == null ? EditorMode.SPLIT : mode;
+        markdownSplitPane.getItems().clear();
+        switch (editorMode) {
+            case EDIT -> markdownSplitPane.getItems().setAll(contentEditor);
+            case PREVIEW -> markdownSplitPane.getItems().setAll(previewPane);
+            case SPLIT -> {
+                markdownSplitPane.getItems().setAll(contentEditor, previewPane);
+                markdownSplitPane.setDividerPositions(0.52);
+            }
+        }
+        updateEditorModeButtons();
+    }
+
+    private void updateEditorModeButtons() {
+        editModeButton.getStyleClass().remove("mode-button-active");
+        splitModeButton.getStyleClass().remove("mode-button-active");
+        previewModeButton.getStyleClass().remove("mode-button-active");
+        switch (editorMode) {
+            case EDIT -> editModeButton.getStyleClass().add("mode-button-active");
+            case SPLIT -> splitModeButton.getStyleClass().add("mode-button-active");
+            case PREVIEW -> previewModeButton.getStyleClass().add("mode-button-active");
+        }
     }
 
     private void deleteSelectedNote() {
@@ -1401,7 +1382,9 @@ public class MainView {
     }
 
     private void updateWordCount() {
-        String plainText = plainText(sanitizeEditorHtml(contentEditor.getHtmlText()));
+        String plainText = selectedNote != null && selectedNote.getContentFormat() == ContentFormat.HTML
+                ? plainText(selectedNote.getContent())
+                : MarkdownTextExtractor.toPlainText(contentEditor.getText());
         long count = plainText.chars().filter(ch -> !Character.isWhitespace(ch)).count();
         wordCountLabel.setText(count + " 字");
     }
@@ -1565,12 +1548,19 @@ public class MainView {
             if (!candidate.isBlank()) {
                 return candidate;
             }
-            candidate = sanitizePreview(note.getContent());
+            candidate = sanitizePreview(note.getContent(), note.getContentFormat());
             return candidate.isBlank() ? "无正文" : candidate;
         }
 
         private String sanitizePreview(String value) {
             return HtmlTextExtractor.toPlainText(value).replaceAll("\\s+", " ").strip();
+        }
+
+        private String sanitizePreview(String value, ContentFormat contentFormat) {
+            if (contentFormat == ContentFormat.MARKDOWN) {
+                return MarkdownTextExtractor.toPlainText(value).replaceAll("\\s+", " ").strip();
+            }
+            return sanitizePreview(value);
         }
 
         private TextFlow highlightText(String value, String query, String baseStyleClass) {

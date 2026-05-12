@@ -126,7 +126,7 @@
 当前优先建议先补两块：
 
 1. 完成 Markdown 迁移 M0 基线确认，重点验证当前版本可回退、可同步、可手工 smoke。
-2. 开始 Markdown 迁移 M1，先引入 `content_format`，不要立刻加入图片附件同步。
+2. 开始 Markdown 迁移 M2，用最小 Markdown 编辑/预览体验替换 `HTMLEditor`，不要立刻加入图片附件同步。
 
 ## 当前进度备注
 

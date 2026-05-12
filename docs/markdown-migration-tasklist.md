@@ -34,13 +34,14 @@
 
 目标：让本地保存和同步链路都以 Markdown 文本为事实源。
 
-- [ ] 引入 `content_format` 概念，建议取值 `HTML`、`MARKDOWN`。
-- [ ] 本地 SQLite `notes` 增加 `content_format TEXT NOT NULL DEFAULT 'HTML'`。
-- [ ] 服务端 `tbl_note` 增加 `content_format VARCHAR(16) NOT NULL DEFAULT 'HTML'`。
-- [ ] DTO 增加 `contentFormat` 字段，保持旧客户端兼容默认值。
-- [ ] `Note` / `RemoteNote` 模型增加 `contentFormat`。
-- [ ] `NoteRepository` 保存、读取、同步应用远端内容时保留格式字段。
-- [ ] `NoteService` / `SyncService` 按 `contentFormat` 处理摘要生成。
+- [x] 引入 `content_format` 概念，取值 `HTML`、`MARKDOWN`。
+- [x] 本地 SQLite `notes` 增加 `content_format` 字段，既有 v1 数据迁移默认 `HTML`。
+- [x] 服务端 `tbl_note` 增加 `content_format VARCHAR(16) NOT NULL DEFAULT 'HTML'`。
+- [x] 服务端启动时自动补齐 `tbl_note.content_format`，避免部署后忘记手工迁移。
+- [x] DTO 增加 `contentFormat` 字段，保持旧客户端兼容默认值。
+- [x] `Note` / `RemoteNote` 模型增加 `contentFormat`。
+- [x] `NoteRepository` 保存、读取、同步应用远端内容时保留格式字段。
+- [x] `NoteService` / `SyncService` 按 `contentFormat` 处理摘要生成。
 
 验收标准：
 
@@ -52,13 +53,13 @@
 
 目标：用 Markdown 编辑体验替换 `HTMLEditor`，保留当前三栏产品体验。
 
-- [ ] 将 `HTMLEditor` 替换为 Markdown 输入区，优先使用 `TextArea`。
-- [ ] 增加预览区，建议使用 `WebView` 渲染 Markdown HTML。
-- [ ] 支持编辑/预览/分屏三种模式，先做最小可用版本。
-- [ ] 字数统计改为 Markdown 纯文本统计。
-- [ ] 卡片摘要从 Markdown 渲染后的纯文本生成。
+- [x] 将 `HTMLEditor` 替换为 Markdown 输入区，优先使用 `TextArea`。
+- [x] 增加预览区，使用 `WebView` 渲染 Markdown HTML。
+- [x] 支持编辑/预览/分屏三种模式，先做最小可用版本。
+- [x] 字数统计改为 Markdown 纯文本统计。
+- [x] 卡片摘要从 Markdown 纯文本生成。
 - [ ] 搜索继续覆盖标题、摘要、正文。
-- [ ] 移除或隐藏 HTML 富文本工具条相关逻辑。
+- [x] 移除或隐藏 HTML 富文本工具条相关逻辑。
 
 验收标准：
 
@@ -89,7 +90,7 @@
 目标：Markdown 模型下同步稳定，冲突处理仍然可用。
 
 - [ ] 更新 `SyncNoteRequest`、`SyncChangeNote`、`NoteResponse` 文档。
-- [ ] 服务端变化拉取返回 `contentFormat`。
+- [x] 服务端变化拉取返回 `contentFormat`。
 - [ ] 冲突副本保留原格式字段。
 - [ ] 服务端摘要生成支持 Markdown 去标记。
 - [ ] 补同步测试：Markdown 创建、更新、冲突、拉取、旧 HTML 兼容。

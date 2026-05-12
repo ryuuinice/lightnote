@@ -1,5 +1,6 @@
 package com.lightnote.client.repository;
 
+import com.lightnote.client.model.ContentFormat;
 import com.lightnote.client.model.Note;
 import com.lightnote.client.model.NoteFilter;
 import com.lightnote.client.model.SyncStatus;
@@ -8,6 +9,7 @@ import com.lightnote.client.remote.SyncConflictItem;
 import com.lightnote.client.remote.SyncItemResult;
 import com.lightnote.client.util.HtmlContentSanitizer;
 import com.lightnote.client.util.HtmlTextExtractor;
+import com.lightnote.client.util.MarkdownTextExtractor;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -145,6 +147,7 @@ public class NoteRepository {
         note.setNoteUuid(UUID.randomUUID().toString());
         note.setTitle("未命名笔记");
         note.setContent("");
+        note.setContentFormat(ContentFormat.MARKDOWN);
         note.setSummary("");
         note.setCategoryName("");
         note.setPinned(false);
@@ -159,10 +162,10 @@ public class NoteRepository {
 
         String sql = """
                 INSERT INTO notes (
-                    note_uuid, title, content, summary, category_name,
+                    note_uuid, title, content, content_format, summary, category_name,
                     is_pinned, is_favorite, is_archived, is_deleted,
                     object_version, server_version, sync_status, create_time, update_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
@@ -183,9 +186,9 @@ public class NoteRepository {
         if (note.getId() == null) {
             throw new IllegalArgumentException("Cannot save note without id");
         }
-        note.setContent(normalizeStoredContent(note.getContent()));
+        note.setContent(normalizeStoredContent(note.getContentFormat(), note.getContent()));
         note.setTitle(normalizeTitle(note.getTitle(), note.getContent()));
-        note.setSummary(buildSummary(note.getSummary(), note.getContent()));
+        note.setSummary(buildSummary(note.getSummary(), note.getContent(), note.getContentFormat()));
         note.setCategoryName(normalizeCategoryName(note.getCategoryName()));
         note.setUpdateTime(now());
         if (note.getSyncStatus() == SyncStatus.SYNCED) {
@@ -196,6 +199,7 @@ public class NoteRepository {
                 UPDATE notes
                 SET title = ?,
                     content = ?,
+                    content_format = ?,
                     summary = ?,
                     category_name = ?,
                     is_pinned = ?,
@@ -209,14 +213,15 @@ public class NoteRepository {
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, note.getTitle());
             statement.setString(2, note.getContent());
-            statement.setString(3, note.getSummary());
-            statement.setString(4, note.getCategoryName());
-            statement.setInt(5, note.isPinned() ? 1 : 0);
-            statement.setInt(6, note.isFavorite() ? 1 : 0);
-            statement.setInt(7, note.isArchived() ? 1 : 0);
-            statement.setString(8, note.getSyncStatus().name());
-            statement.setString(9, note.getUpdateTime());
-            statement.setLong(10, note.getId());
+            statement.setString(3, note.getContentFormat().name());
+            statement.setString(4, note.getSummary());
+            statement.setString(5, note.getCategoryName());
+            statement.setInt(6, note.isPinned() ? 1 : 0);
+            statement.setInt(7, note.isFavorite() ? 1 : 0);
+            statement.setInt(8, note.isArchived() ? 1 : 0);
+            statement.setString(9, note.getSyncStatus().name());
+            statement.setString(10, note.getUpdateTime());
+            statement.setLong(11, note.getId());
             statement.executeUpdate();
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to save note", ex);
@@ -325,8 +330,9 @@ public class NoteRepository {
         String now = now();
         copy.setNoteUuid(UUID.randomUUID().toString());
         copy.setTitle(buildConflictCopyTitle(local.getTitle(), now));
-        copy.setContent(normalizeStoredContent(local.getContent()));
-        copy.setSummary(buildSummary(local.getSummary(), copy.getContent()));
+        copy.setContentFormat(local.getContentFormat());
+        copy.setContent(normalizeStoredContent(copy.getContentFormat(), local.getContent()));
+        copy.setSummary(buildSummary(local.getSummary(), copy.getContent(), copy.getContentFormat()));
         copy.setCategoryName(local.getCategoryName());
         copy.setPinned(local.isPinned());
         copy.setFavorite(local.isFavorite());
@@ -340,10 +346,10 @@ public class NoteRepository {
 
         String sql = """
                 INSERT INTO notes (
-                    note_uuid, title, content, summary, category_name,
+                    note_uuid, title, content, content_format, summary, category_name,
                     is_pinned, is_favorite, is_archived, is_deleted,
                     object_version, server_version, sync_status, create_time, update_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
@@ -371,30 +377,31 @@ public class NoteRepository {
         Note note = noteFromRemote(remote);
         String sql = """
                 INSERT INTO notes (
-                    note_uuid, title, content, summary, category_name,
+                    note_uuid, title, content, content_format, summary, category_name,
                     is_pinned, is_favorite, is_archived, is_deleted,
                     object_version, server_version, sync_status,
                     create_time, update_time, delete_time, last_sync_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, note.getNoteUuid());
             statement.setString(2, note.getTitle());
             statement.setString(3, note.getContent());
-            statement.setString(4, note.getSummary());
-            statement.setString(5, note.getCategoryName());
-            statement.setInt(6, note.isPinned() ? 1 : 0);
-            statement.setInt(7, note.isFavorite() ? 1 : 0);
-            statement.setInt(8, note.isArchived() ? 1 : 0);
-            statement.setInt(9, note.isDeleted() ? 1 : 0);
-            statement.setLong(10, note.getObjectVersion());
-            statement.setLong(11, note.getServerVersion());
-            statement.setString(12, note.getSyncStatus().name());
-            statement.setString(13, note.getCreateTime());
-            statement.setString(14, note.getUpdateTime());
-            statement.setString(15, note.getDeleteTime());
-            statement.setString(16, note.getLastSyncTime());
+            statement.setString(4, note.getContentFormat().name());
+            statement.setString(5, note.getSummary());
+            statement.setString(6, note.getCategoryName());
+            statement.setInt(7, note.isPinned() ? 1 : 0);
+            statement.setInt(8, note.isFavorite() ? 1 : 0);
+            statement.setInt(9, note.isArchived() ? 1 : 0);
+            statement.setInt(10, note.isDeleted() ? 1 : 0);
+            statement.setLong(11, note.getObjectVersion());
+            statement.setLong(12, note.getServerVersion());
+            statement.setString(13, note.getSyncStatus().name());
+            statement.setString(14, note.getCreateTime());
+            statement.setString(15, note.getUpdateTime());
+            statement.setString(16, note.getDeleteTime());
+            statement.setString(17, note.getLastSyncTime());
             statement.executeUpdate();
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to insert remote note", ex);
@@ -406,6 +413,7 @@ public class NoteRepository {
                 UPDATE notes
                 SET title = ?,
                     content = ?,
+                    content_format = ?,
                     summary = ?,
                     category_name = ?,
                     is_pinned = ?,
@@ -422,22 +430,24 @@ public class NoteRepository {
                 """;
         try (Connection connection = getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
-            String content = normalizeStoredContent(remote.content());
+            ContentFormat contentFormat = ContentFormat.from(remote.contentFormat());
+            String content = normalizeStoredContent(contentFormat, remote.content());
             statement.setString(1, remote.title());
             statement.setString(2, content);
-            statement.setString(3, buildSummary(remote.summary(), content));
-            statement.setString(4, normalizeCategoryName(remote.categoryName()));
-            statement.setInt(5, remote.pinned() ? 1 : 0);
-            statement.setInt(6, remote.favorite() ? 1 : 0);
-            statement.setInt(7, remote.archived() ? 1 : 0);
-            statement.setInt(8, remote.deleted() ? 1 : 0);
-            statement.setLong(9, remote.objectVersion());
-            statement.setLong(10, remote.serverVersion());
-            statement.setString(11, SyncStatus.SYNCED.name());
-            statement.setString(12, nullToNow(remote.updateTime()));
-            statement.setString(13, remote.deleteTime());
-            statement.setString(14, now());
-            statement.setString(15, remote.noteUuid());
+            statement.setString(3, contentFormat.name());
+            statement.setString(4, buildSummary(remote.summary(), content, contentFormat));
+            statement.setString(5, normalizeCategoryName(remote.categoryName()));
+            statement.setInt(6, remote.pinned() ? 1 : 0);
+            statement.setInt(7, remote.favorite() ? 1 : 0);
+            statement.setInt(8, remote.archived() ? 1 : 0);
+            statement.setInt(9, remote.deleted() ? 1 : 0);
+            statement.setLong(10, remote.objectVersion());
+            statement.setLong(11, remote.serverVersion());
+            statement.setString(12, SyncStatus.SYNCED.name());
+            statement.setString(13, nullToNow(remote.updateTime()));
+            statement.setString(14, remote.deleteTime());
+            statement.setString(15, now());
+            statement.setString(16, remote.noteUuid());
             statement.executeUpdate();
         } catch (SQLException ex) {
             throw new IllegalStateException("Failed to update remote note", ex);
@@ -448,8 +458,9 @@ public class NoteRepository {
         Note note = new Note();
         note.setNoteUuid(remote.noteUuid());
         note.setTitle(remote.title());
-        note.setContent(normalizeStoredContent(remote.content()));
-        note.setSummary(buildSummary(remote.summary(), note.getContent()));
+        note.setContentFormat(ContentFormat.from(remote.contentFormat()));
+        note.setContent(normalizeStoredContent(note.getContentFormat(), remote.content()));
+        note.setSummary(buildSummary(remote.summary(), note.getContent(), note.getContentFormat()));
         note.setCategoryName(normalizeCategoryName(remote.categoryName()));
         note.setPinned(remote.pinned());
         note.setFavorite(remote.favorite());
@@ -570,8 +581,9 @@ public class NoteRepository {
             note.setId(resultSet.getLong("id"));
             note.setNoteUuid(resultSet.getString("note_uuid"));
             note.setTitle(resultSet.getString("title"));
-            note.setContent(normalizeStoredContent(resultSet.getString("content")));
-            note.setSummary(buildSummary(resultSet.getString("summary"), note.getContent()));
+            note.setContentFormat(ContentFormat.from(resultSet.getString("content_format")));
+            note.setContent(normalizeStoredContent(note.getContentFormat(), resultSet.getString("content")));
+            note.setSummary(buildSummary(resultSet.getString("summary"), note.getContent(), note.getContentFormat()));
             note.setCategoryName(resultSet.getString("category_name"));
             note.setPinned(resultSet.getInt("is_pinned") == 1);
             note.setFavorite(resultSet.getInt("is_favorite") == 1);
@@ -593,24 +605,25 @@ public class NoteRepository {
         statement.setString(1, note.getNoteUuid());
         statement.setString(2, note.getTitle());
         statement.setString(3, note.getContent());
-        statement.setString(4, note.getSummary());
-        statement.setString(5, note.getCategoryName());
-        statement.setInt(6, note.isPinned() ? 1 : 0);
-        statement.setInt(7, note.isFavorite() ? 1 : 0);
-        statement.setInt(8, note.isArchived() ? 1 : 0);
-        statement.setInt(9, note.isDeleted() ? 1 : 0);
-        statement.setLong(10, note.getObjectVersion());
-        statement.setLong(11, note.getServerVersion());
-        statement.setString(12, note.getSyncStatus().name());
-        statement.setString(13, note.getCreateTime());
-        statement.setString(14, note.getUpdateTime());
+        statement.setString(4, note.getContentFormat().name());
+        statement.setString(5, note.getSummary());
+        statement.setString(6, note.getCategoryName());
+        statement.setInt(7, note.isPinned() ? 1 : 0);
+        statement.setInt(8, note.isFavorite() ? 1 : 0);
+        statement.setInt(9, note.isArchived() ? 1 : 0);
+        statement.setInt(10, note.isDeleted() ? 1 : 0);
+        statement.setLong(11, note.getObjectVersion());
+        statement.setLong(12, note.getServerVersion());
+        statement.setString(13, note.getSyncStatus().name());
+        statement.setString(14, note.getCreateTime());
+        statement.setString(15, note.getUpdateTime());
     }
 
     private String normalizeTitle(String title, String content) {
         if (title != null && !title.isBlank()) {
             return title.strip();
         }
-        String plainContent = stripHtml(content);
+        String plainContent = plainText(content, ContentFormat.HTML);
         if (!plainContent.isBlank()) {
             String firstLine = plainContent.lines().findFirst().orElse("").strip();
             if (!firstLine.isEmpty()) {
@@ -620,19 +633,25 @@ public class NoteRepository {
         return "未命名笔记";
     }
 
-    private String buildSummary(String summary, String content) {
-        String source = stripHtml(content).strip().replaceAll("\\s+", " ");
+    private String buildSummary(String summary, String content, ContentFormat contentFormat) {
+        String source = plainText(content, contentFormat).strip().replaceAll("\\s+", " ");
         if (source.isEmpty() && summary != null) {
-            source = stripHtml(summary).strip();
+            source = plainText(summary, contentFormat).strip();
         }
         return source.length() > 200 ? source.substring(0, 200) : source;
     }
 
-    private String stripHtml(String value) {
+    private String plainText(String value, ContentFormat contentFormat) {
+        if (contentFormat == ContentFormat.MARKDOWN) {
+            return MarkdownTextExtractor.toPlainText(value);
+        }
         return HtmlTextExtractor.toPlainText(value);
     }
 
-    private String normalizeStoredContent(String value) {
+    private String normalizeStoredContent(ContentFormat contentFormat, String value) {
+        if (contentFormat == ContentFormat.MARKDOWN) {
+            return value == null ? "" : value;
+        }
         return HtmlContentSanitizer.normalizeForStorage(value);
     }
 

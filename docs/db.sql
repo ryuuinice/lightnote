@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS tbl_note (
     user_id BIGINT NOT NULL,
     title VARCHAR(255) NOT NULL,
     content MEDIUMTEXT,
+    content_format VARCHAR(16) NOT NULL DEFAULT 'HTML',
     summary VARCHAR(512),
     category_name VARCHAR(128),
     is_pinned TINYINT NOT NULL DEFAULT 0,

@@ -1,4 +1,6 @@
 .idea/
+.lightnote/
+*/.lightnote/
 */target/
 *.log
 *.tmp

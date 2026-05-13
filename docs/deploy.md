@@ -1,5 +1,7 @@
 # LightNote Deployment
 
+当前 VPS 一键部署脚本和操作说明见 [vps-deploy-readme.md](vps-deploy-readme.md)。
+
 The first server milestone is a local Spring Boot skeleton.
 
 Production deployment target:

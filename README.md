@@ -116,7 +116,7 @@ cd /git-workspace/lightnote-dev
 bash scripts/vps-deploy-server.sh
 ```
 
-详细说明见 [docs/vps-deploy-readme.md](docs/vps-deploy-readme.md)。
+详细说明见 [docs/vps-deploy-readme.md](docs/vps-deploy-readme.md)，完整文档索引见 [docs/README.md](docs/README.md)。
 
 ## 默认开发账号
 
@@ -134,9 +134,15 @@ http://localhost:8080
 ## 目录
 
 ```text
-lightnote-server/   服务端
-lightnote-client/   Windows 桌面客户端
-docs/               设计、接口、数据库、部署文档
-docker/             Docker Compose 示例
-scripts/            本地构建和启动脚本
+.
+├── lightnote-server/   Spring Boot 服务端
+├── lightnote-client/   JavaFX Windows 桌面客户端
+├── docs/               设计、接口、数据库、任务和部署文档
+├── docker/             Docker Compose 示例
+├── scripts/            构建、启动、打包、提交和部署脚本
+├── icon.png            应用图标源文件
+├── README.md           项目总入口
+└── *.md / *.docx       早期设计资料和交付说明
 ```
+
+文档索引和各文档作用见 [docs/README.md](docs/README.md)。

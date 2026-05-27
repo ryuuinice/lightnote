@@ -1,6 +1,7 @@
 package com.lightnote.client.ui;
 
 import com.lightnote.client.repository.AppConfigRepository;
+import com.lightnote.client.sync.ClientSyncService;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -22,10 +23,12 @@ import javafx.stage.Window;
 public class SettingsDialog {
 
     private final AppConfigRepository configRepository;
+    private final ClientSyncService syncService;
     private final Runnable onLogout;
 
-    public SettingsDialog(AppConfigRepository configRepository, Runnable onLogout) {
+    public SettingsDialog(AppConfigRepository configRepository, ClientSyncService syncService, Runnable onLogout) {
         this.configRepository = configRepository;
+        this.syncService = syncService;
         this.onLogout = onLogout;
     }
 
@@ -52,7 +55,7 @@ public class SettingsDialog {
         loginHint.getStyleClass().add("message-label");
 
         Button saveButton = new Button("保存");
-        saveButton.getStyleClass().add("primary-button");
+        saveButton.getStyleClass().add("ghost-button");
         saveButton.setOnAction(event -> {
             configRepository.put("server_url", serverUrlField.getText());
             stage.close();
@@ -63,16 +66,42 @@ public class SettingsDialog {
         closeButton.setOnAction(event -> stage.close());
 
         Button logoutButton = new Button("退出登录");
-        logoutButton.getStyleClass().add("danger-button");
+        logoutButton.getStyleClass().add("ghost-button");
+        logoutButton.setDisable(!configRepository.token().isPresent());
         logoutButton.setOnAction(event -> {
             configRepository.clearLogin();
             stage.close();
             Platform.runLater(onLogout);
         });
 
+        Button reloginButton = new Button("重新登录");
+        reloginButton.getStyleClass().add("ghost-button");
+        reloginButton.setDisable(!configRepository.token().isPresent());
+        reloginButton.setOnAction(event -> {
+            stage.close();
+            Platform.runLater(onLogout);
+        });
+
+        Button testButton = new Button("测试连接");
+        testButton.getStyleClass().add("ghost-button");
+        testButton.setOnAction(event -> {
+            String url = serverUrlField.getText();
+            loginHint.setText("正在测试连接...");
+            testButton.setDisable(true);
+            Thread t = new Thread(() -> {
+                boolean ok = syncService.testServer(url);
+                Platform.runLater(() -> {
+                    loginHint.setText(ok ? "服务端可访问" : "无法访问服务端，请检查地址");
+                    testButton.setDisable(false);
+                });
+            }, "lightnote-settings-test");
+            t.setDaemon(true);
+            t.start();
+        });
+
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        HBox actions = new HBox(10, logoutButton, spacer, closeButton, saveButton);
+        HBox actions = new HBox(10, testButton, reloginButton, logoutButton, spacer, closeButton, saveButton);
         actions.setAlignment(Pos.CENTER_LEFT);
 
         VBox content = new VBox(14,
@@ -87,7 +116,7 @@ public class SettingsDialog {
         content.setPadding(new Insets(20));
         content.getStyleClass().addAll("app-root", "settings-content");
 
-        Scene scene = new Scene(content, 520, 280);
+        Scene scene = new Scene(content, 520, 300);
         if (owner != null && owner.getScene() != null) {
             scene.getStylesheets().addAll(owner.getScene().getStylesheets());
         }

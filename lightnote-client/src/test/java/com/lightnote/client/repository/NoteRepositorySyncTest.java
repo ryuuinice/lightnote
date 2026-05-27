@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 import com.lightnote.client.model.ContentFormat;
 import com.lightnote.client.model.Note;
 import com.lightnote.client.model.NoteFilter;
+import com.lightnote.client.config.MyBatisSqlSessionFactory;
 import com.lightnote.client.model.SyncStatus;
 import com.lightnote.client.repository.NoteRepository.CategorySummary;
 import com.lightnote.client.remote.RemoteNote;
@@ -45,6 +46,7 @@ class NoteRepositorySyncTest {
 
     @AfterEach
     void tearDown() throws IOException {
+        MyBatisSqlSessionFactory.resetForTest();
         System.clearProperty("lightnote.dataDir");
         if (tempDir == null) {
             return;

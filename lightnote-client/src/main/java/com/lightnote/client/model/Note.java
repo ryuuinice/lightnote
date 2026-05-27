@@ -89,11 +89,25 @@ public class Note {
         this.pinned = pinned;
     }
 
+    /**
+     * MyBatis 自动映射 {@code is_pinned} 列时使用的写入方法。
+     */
+    public void setIsPinned(boolean pinned) {
+        this.pinned = pinned;
+    }
+
     public boolean isFavorite() {
         return favorite;
     }
 
     public void setFavorite(boolean favorite) {
+        this.favorite = favorite;
+    }
+
+    /**
+     * MyBatis 自动映射 {@code is_favorite} 列时使用的写入方法。
+     */
+    public void setIsFavorite(boolean favorite) {
         this.favorite = favorite;
     }
 
@@ -105,6 +119,13 @@ public class Note {
         this.archived = archived;
     }
 
+    /**
+     * MyBatis 自动映射 {@code is_archived} 列时使用的写入方法。
+     */
+    public void setIsArchived(boolean archived) {
+        this.archived = archived;
+    }
+
     public boolean isTrashed() {
         return trashed;
     }
@@ -113,11 +134,25 @@ public class Note {
         this.trashed = trashed;
     }
 
+    /**
+     * MyBatis 自动映射 {@code is_trashed} 列时使用的写入方法。
+     */
+    public void setIsTrashed(boolean trashed) {
+        this.trashed = trashed;
+    }
+
     public boolean isDeleted() {
         return deleted;
     }
 
     public void setDeleted(boolean deleted) {
+        this.deleted = deleted;
+    }
+
+    /**
+     * MyBatis 自动映射 {@code is_deleted} 列时使用的写入方法。
+     */
+    public void setIsDeleted(boolean deleted) {
         this.deleted = deleted;
     }
 

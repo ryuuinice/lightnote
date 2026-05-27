@@ -36,6 +36,12 @@ public class LightNoteApiClient {
     }
 
     /**
+     * 简单的健康/会话检查接口，用于验证当前 JWT 是否仍然有效。
+     */
+    public JsonNode health(String token) {
+        return sendJson("GET", "/api/health", token, null);
+    }
+    /**
      * 调用登录接口并解析令牌信息。
      */
     public LoginResponse login(String username, String password) {

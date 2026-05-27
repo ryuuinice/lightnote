@@ -1,5 +1,7 @@
 package com.lightnote.client.repository;
 
+import com.lightnote.client.config.MyBatisSqlSessionFactory;
+import com.lightnote.client.mapper.NoteMapper;
 import com.lightnote.client.model.ContentFormat;
 import com.lightnote.client.model.Note;
 import com.lightnote.client.model.NoteFilter;
@@ -10,21 +12,20 @@ import com.lightnote.client.remote.SyncItemResult;
 import com.lightnote.client.util.HtmlContentSanitizer;
 import com.lightnote.client.util.HtmlTextExtractor;
 import com.lightnote.client.util.MarkdownTextExtractor;
+import org.apache.ibatis.session.SqlSession;
+
 import java.nio.file.Path;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
  * 笔记仓库，负责本地 SQLite 中笔记的增删改查、筛选、搜索与同步字段维护。
+ * <p>
+ * 基于 MyBatis 实现，委托 {@link NoteMapper} 完成数据库操作。
  */
 public class NoteRepository {
 
@@ -38,20 +39,17 @@ public class NoteRepository {
         this.databasePath = databasePath;
     }
 
+    // ======================== 查询方法 ========================
+
     /**
      * 查询默认活动笔记列表；有搜索词时退化为标题、正文、摘要的模糊搜索。
      */
     public List<Note> listActive(String query) {
         String normalized = query == null ? "" : query.trim();
         if (normalized.isEmpty()) {
-            return queryNotes("""
-                    SELECT *
-                    FROM notes
-                    WHERE is_deleted = 0
-                      AND is_trashed = 0
-                      AND is_archived = 0
-                    ORDER BY is_pinned DESC, update_time DESC
-                    """);
+            try (SqlSession session = openSession()) {
+                return mapper(session).listActive();
+            }
         }
         return searchLike(normalized);
     }
@@ -72,12 +70,9 @@ public class NoteRepository {
         String where = buildWhereClause(safeFilter, normalizedCategory);
 
         if (normalized.isEmpty()) {
-            return queryNotes("""
-                    SELECT *
-                    FROM notes
-                    WHERE %s
-                    ORDER BY is_pinned DESC, update_time DESC
-                    """.formatted(where), List.of());
+            try (SqlSession session = openSession()) {
+                return mapper(session).listByWhere(where);
+            }
         }
         return searchLikeWithWhere(normalized, where);
     }
@@ -90,13 +85,8 @@ public class NoteRepository {
         String where = safeFilter == NoteFilter.ALL
                 ? "is_deleted = 0 AND is_trashed = 0 AND is_archived = 0"
                 : buildWhereClause(safeFilter, null);
-        String sql = "SELECT COUNT(*) FROM notes WHERE " + where;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql);
-             ResultSet resultSet = statement.executeQuery()) {
-            return resultSet.next() ? resultSet.getLong(1) : 0;
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to count notes for filter " + safeFilter, ex);
+        try (SqlSession session = openSession()) {
+            return mapper(session).countByWhere(where);
         }
     }
 
@@ -104,33 +94,16 @@ public class NoteRepository {
      * 汇总当前所有分类及其笔记数，未分类会归并为空字符串类别。
      */
     public List<CategorySummary> listCategorySummaries() {
-        String sql = """
-                SELECT
-                    COALESCE(NULLIF(TRIM(category_name), ''), '') AS normalized_category_name,
-                    COUNT(*) AS note_count
-                FROM notes
-                WHERE is_deleted = 0
-                  AND is_trashed = 0
-                  AND is_archived = 0
-                GROUP BY normalized_category_name
-                ORDER BY
-                    CASE WHEN normalized_category_name = '' THEN 1 ELSE 0 END,
-                    note_count DESC,
-                    normalized_category_name COLLATE NOCASE ASC
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql);
-             ResultSet resultSet = statement.executeQuery()) {
-            List<CategorySummary> categories = new ArrayList<>();
-            while (resultSet.next()) {
-                categories.add(new CategorySummary(
-                        resultSet.getString("normalized_category_name"),
-                        resultSet.getLong("note_count")
+        try (SqlSession session = openSession()) {
+            List<Map<String, Object>> raw = mapper(session).listCategorySummariesRaw();
+            List<CategorySummary> result = new ArrayList<>(raw.size());
+            for (Map<String, Object> row : raw) {
+                result.add(new CategorySummary(
+                        (String) row.get("name"),
+                        ((Number) row.get("count")).longValue()
                 ));
             }
-            return categories;
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to list categories", ex);
+            return result;
         }
     }
 
@@ -143,18 +116,9 @@ public class NoteRepository {
         if (previous.isEmpty() || next.isEmpty() || previous.equals(next)) {
             return;
         }
-        String sql = """
-                UPDATE notes
-                SET category_name = ?
-                WHERE COALESCE(NULLIF(TRIM(category_name), ''), '') = ?
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, next);
-            statement.setString(2, previous);
-            statement.executeUpdate();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to rename category", ex);
+        try (SqlSession session = openSession()) {
+            mapper(session).renameCategory(previous, next);
+            session.commit();
         }
     }
 
@@ -181,26 +145,11 @@ public class NoteRepository {
         note.setCreateTime(now);
         note.setUpdateTime(now);
 
-        String sql = """
-                INSERT INTO notes (
-                    note_uuid, title, content, content_format, summary, category_name,
-                    is_pinned, is_favorite, is_archived, is_trashed, is_deleted,
-                    object_version, server_version, sync_status, create_time, update_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-            bindNoteForInsert(statement, note);
-            statement.executeUpdate();
-            try (ResultSet keys = statement.getGeneratedKeys()) {
-                if (keys.next()) {
-                    note.setId(keys.getLong(1));
-                }
-            }
-            return note;
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to create note", ex);
+        try (SqlSession session = openSession()) {
+            mapper(session).insert(note);
+            session.commit();
         }
+        return note;
     }
 
     /**
@@ -219,38 +168,9 @@ public class NoteRepository {
             note.setSyncStatus(SyncStatus.DIRTY);
         }
 
-        String sql = """
-                UPDATE notes
-                SET title = ?,
-                    content = ?,
-                    content_format = ?,
-                    summary = ?,
-                    category_name = ?,
-                    is_pinned = ?,
-                    is_favorite = ?,
-                    is_archived = ?,
-                    is_trashed = ?,
-                    sync_status = ?,
-                    update_time = ?
-                WHERE id = ?
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, note.getTitle());
-            statement.setString(2, note.getContent());
-            statement.setString(3, note.getContentFormat().name());
-            statement.setString(4, note.getSummary());
-            statement.setString(5, note.getCategoryName());
-            statement.setInt(6, note.isPinned() ? 1 : 0);
-            statement.setInt(7, note.isFavorite() ? 1 : 0);
-            statement.setInt(8, note.isArchived() ? 1 : 0);
-            statement.setInt(9, note.isTrashed() ? 1 : 0);
-            statement.setString(10, note.getSyncStatus().name());
-            statement.setString(11, note.getUpdateTime());
-            statement.setLong(12, note.getId());
-            statement.executeUpdate();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to save note", ex);
+        try (SqlSession session = openSession()) {
+            mapper(session).update(note);
+            session.commit();
         }
     }
 
@@ -259,19 +179,9 @@ public class NoteRepository {
             return;
         }
         String now = now();
-        String sql = """
-                UPDATE notes
-                SET is_trashed = 1,
-                    update_time = ?
-                WHERE id = ?
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, now);
-            statement.setLong(2, note.getId());
-            statement.executeUpdate();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to move note to trash", ex);
+        try (SqlSession session = openSession()) {
+            mapper(session).moveToTrash(note.getId(), now);
+            session.commit();
         }
     }
 
@@ -280,19 +190,9 @@ public class NoteRepository {
             return;
         }
         String now = now();
-        String sql = """
-                UPDATE notes
-                SET is_trashed = 0,
-                    update_time = ?
-                WHERE id = ?
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, now);
-            statement.setLong(2, note.getId());
-            statement.executeUpdate();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to restore note from trash", ex);
+        try (SqlSession session = openSession()) {
+            mapper(session).restoreFromTrash(note.getId(), now);
+            session.commit();
         }
     }
 
@@ -301,48 +201,21 @@ public class NoteRepository {
             return;
         }
         String now = now();
-        String sql = """
-                UPDATE notes
-                SET is_trashed = 1,
-                    is_deleted = 1,
-                    sync_status = ?,
-                    update_time = ?,
-                    delete_time = ?
-                WHERE id = ?
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, SyncStatus.DELETE_PENDING.name());
-            statement.setString(2, now);
-            statement.setString(3, now);
-            statement.setLong(4, note.getId());
-            statement.executeUpdate();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to delete note", ex);
+        try (SqlSession session = openSession()) {
+            mapper(session).softDelete(note.getId(), SyncStatus.DELETE_PENDING.name(), now, now);
+            session.commit();
         }
     }
 
     public List<Note> listPendingSync() {
-        return queryNotes("""
-                SELECT *
-                FROM notes
-                WHERE sync_status = 'DELETE_PENDING'
-                   OR (sync_status = 'DIRTY' AND is_trashed = 0)
-                ORDER BY update_time ASC
-                """);
+        try (SqlSession session = openSession()) {
+            return mapper(session).listPendingSync();
+        }
     }
 
     public Note findByUuid(String noteUuid) {
-        String sql = "SELECT * FROM notes WHERE note_uuid = ? LIMIT 1";
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, noteUuid);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                List<Note> found = readNotes(resultSet);
-                return found.isEmpty() ? null : found.get(0);
-            }
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to find note " + noteUuid, ex);
+        try (SqlSession session = openSession()) {
+            return mapper(session).findByUuid(noteUuid);
         }
     }
 
@@ -358,24 +231,10 @@ public class NoteRepository {
         SyncStatus nextStatus = unchangedSincePush || current.getSyncStatus() == SyncStatus.DELETE_PENDING
                 ? SyncStatus.SYNCED
                 : SyncStatus.DIRTY;
-        String sql = """
-                UPDATE notes
-                SET object_version = ?,
-                    server_version = ?,
-                    sync_status = ?,
-                    last_sync_time = ?
-                WHERE note_uuid = ?
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setLong(1, item.objectVersion());
-            statement.setLong(2, item.serverVersion());
-            statement.setString(3, nextStatus.name());
-            statement.setString(4, now());
-            statement.setString(5, item.noteUuid());
-            statement.executeUpdate();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to mark note synced", ex);
+        try (SqlSession session = openSession()) {
+            mapper(session).markSynced(item.noteUuid(), item.objectVersion(), item.serverVersion(),
+                    nextStatus.name(), now());
+            session.commit();
         }
     }
 
@@ -424,30 +283,15 @@ public class NoteRepository {
         copy.setCreateTime(now);
         copy.setUpdateTime(now);
 
-        String sql = """
-                INSERT INTO notes (
-                    note_uuid, title, content, content_format, summary, category_name,
-                    is_pinned, is_favorite, is_archived, is_trashed, is_deleted,
-                    object_version, server_version, sync_status, create_time, update_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-            bindNoteForInsert(statement, copy);
-            statement.executeUpdate();
-            try (ResultSet keys = statement.getGeneratedKeys()) {
-                if (keys.next()) {
-                    copy.setId(keys.getLong(1));
-                }
-            }
-            return copy;
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to create conflict copy", ex);
+        try (SqlSession session = openSession()) {
+            mapper(session).insert(copy);
+            session.commit();
         }
+        return copy;
     }
 
     /**
-     * 用服务端版本覆盖原笔记，和冲突副本配合完成“保留本地修改 + 恢复服务端原件”的策略。
+     * 用服务端版本覆盖原笔记，和冲突副本配合完成"保留本地修改 + 恢复服务端原件"的策略。
      */
     public void resolveConflict(SyncConflictItem conflict) {
         if (conflict == null || conflict.serverNote() == null) {
@@ -456,87 +300,29 @@ public class NoteRepository {
         updateRemote(conflict.serverNote());
     }
 
+    // ======================== 私有方法 ========================
+
+    private SqlSession openSession() {
+        return MyBatisSqlSessionFactory.getInstance(databasePath).openSession();
+    }
+
+    private NoteMapper mapper(SqlSession session) {
+        return session.getMapper(NoteMapper.class);
+    }
+
     private void insertRemote(RemoteNote remote) {
         Note note = noteFromRemote(remote);
-        String sql = """
-                INSERT INTO notes (
-                    note_uuid, title, content, content_format, summary, category_name,
-                    is_pinned, is_favorite, is_archived, is_trashed, is_deleted,
-                    object_version, server_version, sync_status,
-                    create_time, update_time, delete_time, last_sync_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, note.getNoteUuid());
-            statement.setString(2, note.getTitle());
-            statement.setString(3, note.getContent());
-            statement.setString(4, note.getContentFormat().name());
-            statement.setString(5, note.getSummary());
-            statement.setString(6, note.getCategoryName());
-            statement.setInt(7, note.isPinned() ? 1 : 0);
-            statement.setInt(8, note.isFavorite() ? 1 : 0);
-            statement.setInt(9, note.isArchived() ? 1 : 0);
-            statement.setInt(10, note.isTrashed() ? 1 : 0);
-            statement.setInt(11, note.isDeleted() ? 1 : 0);
-            statement.setLong(12, note.getObjectVersion());
-            statement.setLong(13, note.getServerVersion());
-            statement.setString(14, note.getSyncStatus().name());
-            statement.setString(15, note.getCreateTime());
-            statement.setString(16, note.getUpdateTime());
-            statement.setString(17, note.getDeleteTime());
-            statement.setString(18, note.getLastSyncTime());
-            statement.executeUpdate();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to insert remote note", ex);
+        try (SqlSession session = openSession()) {
+            mapper(session).insertFull(note);
+            session.commit();
         }
     }
 
     private void updateRemote(RemoteNote remote) {
-        String sql = """
-                UPDATE notes
-                SET title = ?,
-                    content = ?,
-                    content_format = ?,
-                    summary = ?,
-                    category_name = ?,
-                    is_pinned = ?,
-                    is_favorite = ?,
-                    is_archived = ?,
-                    is_trashed = ?,
-                    is_deleted = ?,
-                    object_version = ?,
-                    server_version = ?,
-                    sync_status = ?,
-                    update_time = ?,
-                    delete_time = ?,
-                    last_sync_time = ?
-                WHERE note_uuid = ?
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            ContentFormat contentFormat = ContentFormat.from(remote.contentFormat());
-            String content = normalizeStoredContent(contentFormat, remote.content());
-            statement.setString(1, remote.title());
-            statement.setString(2, content);
-            statement.setString(3, contentFormat.name());
-            statement.setString(4, buildSummary(remote.summary(), content, contentFormat));
-            statement.setString(5, normalizeCategoryName(remote.categoryName()));
-            statement.setInt(6, remote.pinned() ? 1 : 0);
-            statement.setInt(7, remote.favorite() ? 1 : 0);
-            statement.setInt(8, remote.archived() ? 1 : 0);
-            statement.setInt(9, 0);
-            statement.setInt(10, remote.deleted() ? 1 : 0);
-            statement.setLong(11, remote.objectVersion());
-            statement.setLong(12, remote.serverVersion());
-            statement.setString(13, SyncStatus.SYNCED.name());
-            statement.setString(14, nullToNow(remote.updateTime()));
-            statement.setString(15, remote.deleteTime());
-            statement.setString(16, now());
-            statement.setString(17, remote.noteUuid());
-            statement.executeUpdate();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to update remote note", ex);
+        Note note = noteFromRemote(remote);
+        try (SqlSession session = openSession()) {
+            mapper(session).updateByUuid(note);
+            session.commit();
         }
     }
 
@@ -564,29 +350,20 @@ public class NoteRepository {
     }
 
     private List<Note> searchFts(String query) {
-        String sql = """
-                SELECT notes.*
-                FROM note_fts
-                JOIN notes ON notes.id = note_fts.rowid
-                WHERE note_fts MATCH ?
-                  AND notes.is_deleted = 0
-                  AND notes.is_trashed = 0
-                  AND notes.is_archived = 0
-                ORDER BY notes.is_pinned DESC, notes.update_time DESC
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, escapeFtsQuery(query));
-            try (ResultSet resultSet = statement.executeQuery()) {
-                return readNotes(resultSet);
-            }
-        } catch (SQLException ex) {
-            throw new IllegalStateException("FTS search failed", ex);
+        try (SqlSession session = openSession()) {
+            return mapper(session).searchFts(escapeFtsQuery(query));
         }
     }
 
     private List<Note> searchLike(String query) {
         return searchLikeWithWhere(query, "is_deleted = 0 AND is_trashed = 0 AND is_archived = 0");
+    }
+
+    private List<Note> searchLikeWithWhere(String query, String where) {
+        String pattern = "%" + query + "%";
+        try (SqlSession session = openSession()) {
+            return mapper(session).searchLikeWithWhere(where, pattern);
+        }
     }
 
     private String buildWhereClause(NoteFilter filter, String categoryName) {
@@ -612,46 +389,6 @@ public class NoteRepository {
         return baseTitle + "（冲突副本 " + parsedTime.format(CONFLICT_COPY_TITLE_TIME_FORMATTER) + "）";
     }
 
-    private List<Note> searchLikeWithWhere(String query, String where) {
-        String sql = """
-                SELECT *
-                FROM notes
-                WHERE %s
-                  AND (title LIKE ? OR content LIKE ? OR summary LIKE ?)
-                ORDER BY is_pinned DESC, update_time DESC
-                """.formatted(where);
-        String pattern = "%" + query + "%";
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, pattern);
-            statement.setString(2, pattern);
-            statement.setString(3, pattern);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                return readNotes(resultSet);
-            }
-        } catch (SQLException ex) {
-            throw new IllegalStateException("LIKE search failed", ex);
-        }
-    }
-
-    private List<Note> queryNotes(String sql, List<String> parameters) {
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            for (int index = 0; index < parameters.size(); index++) {
-                statement.setString(index + 1, parameters.get(index));
-            }
-            try (ResultSet resultSet = statement.executeQuery()) {
-                return readNotes(resultSet);
-            }
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to query notes", ex);
-        }
-    }
-
-    private List<Note> queryNotes(String sql) {
-        return queryNotes(sql, List.of());
-    }
-
     private String normalizeCategoryName(String categoryName) {
         return categoryName == null ? "" : categoryName.strip();
     }
@@ -661,53 +398,6 @@ public class NoteRepository {
     }
 
     public record CategorySummary(String name, long count) {
-    }
-
-    private List<Note> readNotes(ResultSet resultSet) throws SQLException {
-        List<Note> notes = new ArrayList<>();
-        while (resultSet.next()) {
-            Note note = new Note();
-            note.setId(resultSet.getLong("id"));
-            note.setNoteUuid(resultSet.getString("note_uuid"));
-            note.setTitle(resultSet.getString("title"));
-            note.setContentFormat(ContentFormat.from(resultSet.getString("content_format")));
-            note.setContent(normalizeStoredContent(note.getContentFormat(), resultSet.getString("content")));
-            note.setSummary(buildSummary(resultSet.getString("summary"), note.getContent(), note.getContentFormat()));
-            note.setCategoryName(resultSet.getString("category_name"));
-            note.setPinned(resultSet.getInt("is_pinned") == 1);
-            note.setFavorite(resultSet.getInt("is_favorite") == 1);
-            note.setArchived(resultSet.getInt("is_archived") == 1);
-            note.setTrashed(resultSet.getInt("is_trashed") == 1);
-            note.setDeleted(resultSet.getInt("is_deleted") == 1);
-            note.setObjectVersion(resultSet.getLong("object_version"));
-            note.setServerVersion(resultSet.getLong("server_version"));
-            note.setSyncStatus(SyncStatus.valueOf(resultSet.getString("sync_status")));
-            note.setCreateTime(resultSet.getString("create_time"));
-            note.setUpdateTime(resultSet.getString("update_time"));
-            note.setDeleteTime(resultSet.getString("delete_time"));
-            note.setLastSyncTime(resultSet.getString("last_sync_time"));
-            notes.add(note);
-        }
-        return notes;
-    }
-
-    private void bindNoteForInsert(PreparedStatement statement, Note note) throws SQLException {
-        statement.setString(1, note.getNoteUuid());
-        statement.setString(2, note.getTitle());
-        statement.setString(3, note.getContent());
-        statement.setString(4, note.getContentFormat().name());
-        statement.setString(5, note.getSummary());
-        statement.setString(6, note.getCategoryName());
-        statement.setInt(7, note.isPinned() ? 1 : 0);
-        statement.setInt(8, note.isFavorite() ? 1 : 0);
-        statement.setInt(9, note.isArchived() ? 1 : 0);
-        statement.setInt(10, note.isTrashed() ? 1 : 0);
-        statement.setInt(11, note.isDeleted() ? 1 : 0);
-        statement.setLong(12, note.getObjectVersion());
-        statement.setLong(13, note.getServerVersion());
-        statement.setString(14, note.getSyncStatus().name());
-        statement.setString(15, note.getCreateTime());
-        statement.setString(16, note.getUpdateTime());
     }
 
     private String normalizeTitle(String title, String content) {
@@ -757,9 +447,4 @@ public class NoteRepository {
     private String nullToNow(String value) {
         return value == null || value.isBlank() ? now() : value;
     }
-
-    private Connection getConnection() throws SQLException {
-        return DriverManager.getConnection("jdbc:sqlite:" + databasePath);
-    }
 }
-

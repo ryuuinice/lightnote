@@ -30,6 +30,39 @@ public class ClientSyncService {
         this(noteRepository, configRepository, LightNoteApiClient::new);
     }
 
+    /**
+     * 验证本地持有的会话/令牌是否仍然可用（用于启动时的快速检查）。
+     */
+    public boolean validateSession() {
+        String serverUrl = configRepository.serverUrl();
+        String token = configRepository.token().orElse(null);
+        if (token == null || token.isBlank()) {
+            return false;
+        }
+        LightNoteApiClient apiClient = apiClientFactory.apply(serverUrl);
+        try {
+            apiClient.health(token);
+            return true;
+        } catch (Exception ex) {
+            LOGGER.info("会话验证失败: " + ex.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 测试指定服务端地址是否可达（用于设置页的连接检测）。
+     */
+    public boolean testServer(String serverUrl) {
+        LightNoteApiClient apiClient = apiClientFactory.apply(serverUrl);
+        try {
+            apiClient.health(null);
+            return true;
+        } catch (Exception ex) {
+            LOGGER.info("服务器连通性检测失败: " + ex.getMessage());
+            return false;
+        }
+    }
+
     ClientSyncService(
             NoteRepository noteRepository,
             AppConfigRepository configRepository,

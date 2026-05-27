@@ -1,11 +1,10 @@
 package com.lightnote.client.repository;
 
+import com.lightnote.client.config.MyBatisSqlSessionFactory;
+import com.lightnote.client.mapper.AppConfigMapper;
+import org.apache.ibatis.session.SqlSession;
+
 import java.nio.file.Path;
-import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -13,6 +12,8 @@ import java.util.Optional;
 
 /**
  * 应用配置仓库，负责登录信息、同步游标、界面偏好和分类目录的本地持久化。
+ * <p>
+ * 基于 MyBatis 实现，委托 {@link AppConfigMapper} 完成 SQLite 键值存取。
  */
 public class AppConfigRepository {
 
@@ -23,18 +24,9 @@ public class AppConfigRepository {
     }
 
     public Optional<String> get(String key) {
-        String sql = "SELECT config_value FROM app_config WHERE config_key = ?";
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, key);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (resultSet.next()) {
-                    return Optional.ofNullable(resultSet.getString("config_value"));
-                }
-            }
-            return Optional.empty();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to read config " + key, ex);
+        try (SqlSession session = openSession()) {
+            return Optional.ofNullable(
+                    session.getMapper(AppConfigMapper.class).selectValue(key));
         }
     }
 
@@ -59,18 +51,9 @@ public class AppConfigRepository {
     }
 
     public void put(String key, String value) {
-        String sql = """
-                INSERT INTO app_config(config_key, config_value)
-                VALUES (?, ?)
-                ON CONFLICT(config_key) DO UPDATE SET config_value = excluded.config_value
-                """;
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, key);
-            statement.setString(2, value);
-            statement.executeUpdate();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to write config " + key, ex);
+        try (SqlSession session = openSession()) {
+            session.getMapper(AppConfigMapper.class).upsert(key, value);
+            session.commit();
         }
     }
 
@@ -100,13 +83,9 @@ public class AppConfigRepository {
     }
 
     public void delete(String key) {
-        String sql = "DELETE FROM app_config WHERE config_key = ?";
-        try (Connection connection = getConnection();
-             PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, key);
-            statement.executeUpdate();
-        } catch (SQLException ex) {
-            throw new IllegalStateException("Failed to delete config " + key, ex);
+        try (SqlSession session = openSession()) {
+            session.getMapper(AppConfigMapper.class).delete(key);
+            session.commit();
         }
     }
 
@@ -188,8 +167,8 @@ public class AppConfigRepository {
         return trimmed.isEmpty() ? "http://localhost:8080" : trimmed;
     }
 
-    private Connection getConnection() throws SQLException {
-        return DriverManager.getConnection("jdbc:sqlite:" + databasePath);
+    private SqlSession openSession() {
+        return MyBatisSqlSessionFactory.getInstance(databasePath).openSession();
     }
 }
 

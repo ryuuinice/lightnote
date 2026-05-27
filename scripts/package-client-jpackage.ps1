@@ -89,7 +89,7 @@ $jpackageArgs = @(
     "--main-jar", $mainJar,
     "--main-class", "com.lightnote.client.LightNoteClientLauncher",
     "--module-path", $javafxModuleDir,
-    "--add-modules", "javafx.controls,javafx.web",
+    "--add-modules", "javafx.controls,javafx.web,java.logging,java.sql",
     "--java-options", "--add-modules=javafx.controls,javafx.web",
     "--java-options", "-Dfile.encoding=UTF-8",
     "--java-options", "-Dprism.lcdtext=false",

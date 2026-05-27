@@ -9,6 +9,9 @@ import com.lightnote.client.ui.LoginView;
 import com.lightnote.client.ui.MainView;
 import com.lightnote.client.util.AppLogger;
 import javafx.application.Application;
+import javafx.application.Platform;
+import javafx.scene.control.Alert;
+import javafx.scene.control.ButtonType;
 import javafx.scene.Scene;
 import javafx.scene.image.Image;
 import javafx.stage.Stage;
@@ -49,6 +52,20 @@ public class LightNoteClientApplication extends Application {
 
         if (configRepository.token().isPresent()) {
             showMain();
+            Thread sessionCheck = new Thread(() -> {
+                boolean ok = syncService.validateSession();
+                if (!ok) {
+                    Platform.runLater(() -> {
+                        Alert alert = new Alert(Alert.AlertType.INFORMATION, "当前登录已过期或不可用，请重新登录。", ButtonType.OK);
+                        alert.setTitle("登录验证失败");
+                        alert.setHeaderText("会话无效");
+                        alert.showAndWait();
+                        showLogin();
+                    });
+                }
+            }, "lightnote-session-check");
+            sessionCheck.setDaemon(true);
+            sessionCheck.start();
         } else {
             showLogin();
         }

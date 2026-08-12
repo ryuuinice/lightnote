@@ -1,0 +1,528 @@
+openapi: 3.0.3
+info:
+  title: LightNote Server API
+  version: v1.1
+  description: |
+    LightNote 服务端 REST API。
+    契约文档，修改必须经过 Agent 0。
+    协议细节见 docs/change-protocol.md，Schema 见 docs/schema/。
+servers:
+  - url: https://example.com/api/v1
+    description: 生产（Caddy HTTPS 反代）
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ------------------------------------------------------------------
+  # Auth（TASK-007 最小 JWT Contract）
+  # Access Token: JWT, claims { sub: user_id, device_id }
+  # 服务端所有同步/业务接口的身份一律以 JWT 为准，不信任请求体自报 device_id
+  # ------------------------------------------------------------------
+  /auth/login:
+    post:
+      summary: 登录（单用户 + 多设备）
+      description: |
+        校验 username + password + device_name。
+        设备首次登录自动注册到 devices 表。
+        返回 Access Token（默认 2h）与 Refresh Token（Phase 6 完整实现，v1.1 最小阶段可返回空/占位）。
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, device_name]
+              properties:
+                username: { type: string, example: admin }
+                password: { type: string, example: "admin123" }
+                device_name: { type: string, example: PC-Windows }
+                device_type: { type: string, example: desktop }
+      responses:
+        "200":
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, refresh_token, expires_in, device_id]
+                properties:
+                  access_token: { type: string, description: JWT，claims 含 sub(user_id) + device_id }
+                  refresh_token: { type: string }
+                  expires_in: { type: integer, example: 7200 }
+                  device_id: { type: string, description: 服务端签发/确认的 device_id }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/refresh:
+    post:
+      summary: 刷新 Access Token
+      operationId: refresh
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: 新 Access Token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, expires_in]
+                properties:
+                  access_token: { type: string }
+                  expires_in: { type: integer }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ------------------------------------------------------------------
+  # Sync
+  # ------------------------------------------------------------------
+  /sync/push:
+    post:
+      summary: 推送本地 Change 批量提交
+      operationId: syncPush
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [changes]
+              properties:
+                changes:
+                  type: array
+                  maxItems: 1000
+                  items:
+                    $ref: "#/components/schemas/Change"
+      responses:
+        "200":
+          description: 逐条处理结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PushResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          description: 请求体超过 8MB，客户端应分批
+
+  /sync/changes:
+    get:
+      summary: 拉取增量 Change（Pull）
+      description: |
+        after = last_server_sequence。
+        服务端按 server_sequence 升序返回，容忍 gap（回滚产生，属正常）。
+        禁止客户端用 after+1 推断遗漏，翻页以 has_more 为准。
+      operationId: syncPull
+      parameters:
+        - name: after
+          in: query
+          required: true
+          schema: { type: integer, minimum: 0 }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 500, maximum: 1000 }
+      responses:
+        "200":
+          description: 增量 Change 批次
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [changes, next_sequence, has_more]
+                properties:
+                  changes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PullChange"
+                  next_sequence:
+                    type: integer
+                    description: 本批次最后一条 server_sequence（无变更时 = after）
+                  has_more: { type: boolean }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ------------------------------------------------------------------
+  # Notes
+  # ------------------------------------------------------------------
+  /notes:
+    get:
+      summary: 笔记列表（元数据，不含正文）
+      operationId: listNotes
+      parameters:
+        - name: parent_note_id
+          in: query
+          required: false
+          schema: { type: string }
+          description: 树形：只返回该父节点下未删除的直接子节点
+        - name: include_deleted
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 200 }
+      responses:
+        "200":
+          description: 笔记元数据列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notes]
+                properties:
+                  notes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Note"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /notes/{note_id}:
+    get:
+      summary: 笔记详情（元数据；正文经 blob_id 走 Blob API）
+      operationId: getNote
+      parameters:
+        - name: note_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 笔记详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Note"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: 删除笔记（Tombstone，is_deleted=1）
+      operationId: deleteNote
+      parameters:
+        - name: note_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 已标记删除（产生 DELETE Change 同步）
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ------------------------------------------------------------------
+  # Branches（树形组织）
+  # ------------------------------------------------------------------
+  /branches:
+    get:
+      summary: 分支列表
+      operationId: listBranches
+      parameters:
+        - name: parent_note_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: include_deleted
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: 分支列表（按 sort_order 升序）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [branches]
+                properties:
+                  branches:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Branch"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ------------------------------------------------------------------
+  # Attributes（标签 / 关系）
+  # ------------------------------------------------------------------
+  /notes/{note_id}/attributes:
+    get:
+      summary: 笔记的标签与属性
+      operationId: listAttributes
+      parameters:
+        - name: note_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 属性列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attributes]
+                properties:
+                  attributes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Attribute"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ------------------------------------------------------------------
+  # Blobs（内容寻址）
+  # blob_id = 'sha256:' || hex(SHA-256(content))
+  # ------------------------------------------------------------------
+  /blobs/init:
+    post:
+      summary: 初始化上传（服务端已有该 blob 则直接 Already Exists）
+      operationId: blobInit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [blob_id, size]
+              properties:
+                blob_id: { type: string, example: "sha256:abcd..." }
+                size: { type: integer }
+                mime_type: { type: string, example: "text/markdown" }
+      responses:
+        "200":
+          description: 上传会话或已存在
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [EXISTS, CREATED] }
+                  upload_session_id: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /blobs/{blob_id}/chunks/{index}:
+    put:
+      summary: 上传分片（4~16MB）
+      operationId: blobChunkPut
+      parameters:
+        - name: blob_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: index
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: 分片已接收（重复分片安全忽略）
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /blobs/{blob_id}/complete:
+    post:
+      summary: 完成上传（服务端重算 SHA-256 与 blob_id 校验）
+      operationId: blobComplete
+      parameters:
+        - name: blob_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 校验通过，blob 可用
+        "400":
+          description: SHA-256 与 blob_id 不一致，REJECT
+
+  /blobs/{blob_id}:
+    get:
+      summary: 下载 Blob 内容
+      operationId: blobGet
+      parameters:
+        - name: blob_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 二进制内容
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ------------------------------------------------------------------
+  # Devices
+  # ------------------------------------------------------------------
+  /devices:
+    get:
+      summary: 设备列表
+      operationId: listDevices
+      responses:
+        "200":
+          description: 设备列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [devices]
+                properties:
+                  devices:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Device"
+
+  /devices/{device_id}:
+    delete:
+      summary: 吊销设备（revoked_at 写入，Token 立即失效）
+      operationId: revokeDevice
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: 已吊销
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Unauthorized:
+      description: 未认证或 Token 无效/过期/设备已吊销
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: "INVALID_CREDENTIALS" }
+        message: { type: string }
+
+    Change:
+      type: object
+      required: [change_id, entity_type, entity_id, operation, base_version, version, payload]
+      properties:
+        change_id: { type: string, description: UUIDv7，幂等依据 }
+        entity_type: { type: string, enum: [note, branch, attribute, blob] }
+        entity_id: { type: string }
+        operation: { type: string, enum: [CREATE, UPDATE, DELETE] }
+        base_version: { type: integer }
+        version: { type: integer }
+        payload:
+          type: object
+          description: 实体完整快照（snake_case 字段，见 docs/schema/）
+        content_hash: { type: string }
+
+    PushResult:
+      type: object
+      required: [change_id, status]
+      properties:
+        change_id: { type: string }
+        status: { type: string, enum: [APPLIED, ALREADY_APPLIED, CONFLICT, INVALID] }
+        server_sequence: { type: integer }
+
+    PullChange:
+      type: object
+      required: [server_sequence, change_id, entity_type, entity_id, operation, version]
+      properties:
+        server_sequence: { type: integer }
+        change_id: { type: string }
+        origin_device_id: { type: string }
+        entity_type: { type: string }
+        entity_id: { type: string }
+        operation: { type: string }
+        version: { type: integer }
+        payload:
+          type: object
+
+    Note:
+      type: object
+      required: [note_id, title, note_type, is_deleted, version]
+      properties:
+        note_id: { type: string }
+        title: { type: string }
+        note_type: { type: string }
+        blob_id: { type: string }
+        is_deleted: { type: boolean }
+        version: { type: integer }
+        updated_at: { type: integer }
+        updated_by: { type: string }
+        created_at: { type: integer }
+        conflict_of_note_id: { type: string }
+
+    Branch:
+      type: object
+      required: [branch_id, parent_note_id, child_note_id, sort_order]
+      properties:
+        branch_id: { type: string }
+        parent_note_id: { type: string }
+        child_note_id: { type: string }
+        sort_order: { type: integer }
+        is_deleted: { type: boolean }
+
+    Attribute:
+      type: object
+      required: [attribute_id, note_id, attr_type, name]
+      properties:
+        attribute_id: { type: string }
+        note_id: { type: string }
+        attr_type: { type: string, enum: [label, relation, meta] }
+        name: { type: string }
+        value: { type: string }
+        is_inherited: { type: boolean }
+
+    Device:
+      type: object
+      required: [device_id, device_name, created_at]
+      properties:
+        device_id: { type: string }
+        device_name: { type: string }
+        device_type: { type: string }
+        last_seen: { type: integer }
+        revoked_at: { type: integer }
+        created_at: { type: integer }

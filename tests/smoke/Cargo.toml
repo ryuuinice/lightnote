@@ -1,0 +1,10 @@
+[package]
+name = "lightnote-smoke"
+version = "0.1.0"
+edition = "2021"
+description = "LightNote 8-item smoke test: real user path over real client cores + real Go server"
+
+[dependencies]
+lightnote_core = { path = "../../client/src-tauri" }
+lightnote_slice = { package = "lightnote-slice", path = "../vertical-slice" }
+tempfile = "3.27.0"

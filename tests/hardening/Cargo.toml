@@ -1,0 +1,13 @@
+[package]
+name = "lightnote-hardening"
+version = "0.1.0"
+edition = "2021"
+description = "LightNote sync hardening integration tests (crash/retry/conflict/guard)"
+
+[dependencies]
+lightnote_core = { path = "../../client/src-tauri" }
+lightnote_slice = { package = "lightnote-slice", path = "../vertical-slice" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde_json = "1.0.151"
+tempfile = "3.27.0"
+ureq = { version = "2.12.1", features = ["json"] }

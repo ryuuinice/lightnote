@@ -1,288 +1,161 @@
-# LightNote API
+# LightNote API v1.1
 
-Base path: `/api`
+> **状态：** Contract Freeze  
+> **所有者：** Agent 0  
+> **机器可读版本：** `docs/openapi.yaml`（本文件为人工阅读摘要，以 openapi.yaml 为准）  
+> **基础路径：** `/api/v1`  
+> **认证：** `Authorization: Bearer <JWT>`
 
-## Response Envelope
+---
 
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {}
-}
-```
+# 1. 认证（TASK-007 最小 JWT Contract）
 
-## Health
-
-`GET /api/health`
-
-Returns service status. This endpoint does not require authentication.
-
-## Auth
-
-`POST /api/auth/login`
-
-Request:
-
-```json
-{
-  "username": "admin",
-  "password": "your-password"
-}
-```
-
-Response:
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    "token": "jwt-token",
-    "expireSeconds": 7200
-  }
-}
-```
-
-Notes:
-
-- `contentFormat` supports `HTML` and `MARKDOWN`.
-- The server keeps the original `content` payload and generates `summary` according to `contentFormat`.
-
-Use the token on protected endpoints:
+## 1.1 模型
 
 ```text
-Authorization: Bearer jwt-token
+单用户 + 多设备
+users → devices → sync_state
 ```
 
-## Notes
-
-All notes endpoints require JWT authentication.
-
-### List Notes
-
-`GET /api/notes`
-
-Response:
+## 1.2 JWT Claims
 
 ```json
 {
-  "code": 0,
-  "message": "success",
-  "data": [
-    {
-      "noteUuid": "uuid",
-      "title": "Linux 常用命令",
-      "content": "systemctl status nginx",
-      "contentFormat": "MARKDOWN",
-      "summary": "systemctl status nginx",
-      "categoryName": "Linux",
-      "pinned": false,
-      "favorite": false,
-      "archived": false,
-      "deleted": false,
-      "objectVersion": 1,
-      "serverVersion": 1,
-      "createTime": "2026-05-07T20:00:00",
-      "updateTime": "2026-05-07T20:00:00",
-      "deleteTime": null
-    }
-  ]
+  "sub": "user-001",
+  "device_id": "device-a"
 }
 ```
 
-### Create Note
+| Claim | 说明 |
+|---|---|
+| sub | user_id |
+| device_id | 设备身份，**服务端签发**，登录时确认/注册到 devices 表 |
 
-`POST /api/notes`
-
-Request:
-
-```json
-{
-  "title": "Linux 常用命令",
-  "content": "systemctl status nginx",
-  "contentFormat": "MARKDOWN",
-  "summary": "systemctl status nginx",
-  "categoryName": "Linux",
-  "pinned": false,
-  "favorite": false,
-  "archived": false
-}
-```
-
-### Update Note
-
-`PUT /api/notes/{noteUuid}`
-
-Request:
-
-```json
-{
-  "baseObjectVersion": 1,
-  "title": "Linux 常用命令",
-  "content": "systemctl restart nginx",
-  "contentFormat": "MARKDOWN",
-  "summary": "systemctl restart nginx",
-  "categoryName": "Linux",
-  "pinned": true,
-  "favorite": false,
-  "archived": false
-}
-```
-
-If `baseObjectVersion` is older than the server note version, the API returns a business conflict error.
-
-### Delete Note
-
-`DELETE /api/notes/{noteUuid}`
-
-Performs a soft delete and writes a sync log entry.
-
-## Sync
-
-All sync endpoints require JWT authentication.
-
-### Push Local Changes
-
-`POST /api/sync/push`
-
-Request:
-
-```json
-{
-  "lastSyncVersion": 100,
-  "notes": [
-    {
-      "noteUuid": "uuid-1",
-      "operation": "UPDATE",
-      "baseObjectVersion": 3,
-      "title": "MySQL 慢查询排查",
-      "content": "Markdown 内容",
-      "contentFormat": "MARKDOWN",
-      "summary": "Markdown 内容",
-      "categoryName": "数据库",
-      "pinned": false,
-      "favorite": true,
-      "archived": false,
-      "deleted": false,
-      "clientUpdateTime": "2026-05-07T20:30:00"
-    }
-  ]
-}
-```
-
-Response:
-
-```json
-{
-  "code": 0,
-  "message": "success",
-  "data": {
-    "serverVersion": 120,
-    "successItems": [
-      {
-        "noteUuid": "uuid-1",
-        "objectVersion": 4,
-        "serverVersion": 120
-      }
-    ],
-    "conflictItems": []
-  }
-}
-```
-
-Supported operations:
-
-- `CREATE`
-- `UPDATE`
-- `DELETE`
-
-Conflict rule:
+## 1.3 硬性规则（Device Identity Binding）
 
 ```text
-client.baseObjectVersion < server.objectVersion
+1. 服务端所有接口从 JWT 解析 device_id
+2. 不信任请求体 / Header 中自报的 device_id
+3. entity_changes.origin_device_id 以 JWT 的 device_id 为准
+4. 设备已吊销（devices.revoked_at 非 NULL）→ 全部 Token 拒绝
 ```
 
-When a conflict occurs, the item is returned in `conflictItems` and the server does not overwrite the existing note.
+## 1.4 最小 JWT 阶段范围（v1.1）
 
-Conflict response example:
+| 功能 | 阶段 |
+|---|---|
+| Access Token（HS256，2h）+ claims | ✅ TASK-007（Vertical Slice 前必须完成） |
+| Refresh Token（30 天，轮换制，设备吊销传播） | ✅ Phase 6 |
+| 设备列表 / 吊销 | ✅ Phase 6（接口已定义） |
+| Token 过期刷新 | ✅ Phase 6 |
+
+## 1.5 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/auth/login` | username + password + device_name → access_token + refresh_token + device_id |
+| POST | `/auth/refresh` | refresh_token → 新 access_token + 轮换的新 refresh_token（旧 token 立即失效） |
+
+Refresh 语义（Phase 6 冻结）：
+
+```text
+1. refresh_token 以 SHA-256 哈希存储（服务端不存明文）
+2. 每次刷新轮换：旧 token 标记 revoked，签发新 token
+3. 已轮换 token 复用 → 401 INVALID_REFRESH_TOKEN
+4. 设备已吊销 → 403 DEVICE_REVOKED，且该设备全部 refresh_token 一并吊销
+5. 有效期 30 天
+```
+
+登录示例：
+
+```bash
+curl -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123","device_name":"PC-Windows","device_type":"desktop"}'
+```
+
+响应：
 
 ```json
 {
-  "code": 0,
-  "message": "success",
-  "data": {
-    "serverVersion": 121,
-    "successItems": [],
-    "conflictItems": [
-      {
-        "noteUuid": "uuid-1",
-        "clientBaseObjectVersion": 3,
-        "serverObjectVersion": 4,
-        "serverNote": {
-          "noteUuid": "uuid-1",
-          "operation": "UPDATE",
-          "objectVersion": 4,
-          "serverVersion": 121,
-          "title": "MySQL 慢查询排查",
-          "content": "# Server note\n\nKeep markdown.",
-          "contentFormat": "MARKDOWN",
-          "summary": "Server note Keep markdown.",
-          "categoryName": "数据库",
-          "pinned": false,
-          "favorite": true,
-          "archived": false,
-          "deleted": false,
-          "createTime": "2026-05-07T18:00:00",
-          "updateTime": "2026-05-07T20:40:00",
-          "deleteTime": null
-        }
-      }
-    ]
-  }
+  "access_token": "eyJ...",
+  "refresh_token": "",
+  "expires_in": 7200,
+  "device_id": "01J...device"
 }
 ```
 
-### Pull Remote Changes
+---
 
-`GET /api/sync/changes?sinceVersion=100&limit=200`
+# 2. Sync
 
-Response:
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/sync/push` | 批量 Push（≤1000 条，≤8MB） |
+| GET | `/sync/changes?after=&limit=` | 增量 Pull（升序，容忍 gap，has_more 翻页） |
+
+协议细节见 `docs/change-protocol.md`。
+
+---
+
+# 3. Notes / Branches / Attributes
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/notes?parent_note_id=&include_deleted=` | 树形子节点列表（元数据，懒加载） |
+| GET | `/notes/{note_id}` | 笔记详情（正文经 blob_id 获取） |
+| DELETE | `/notes/{note_id}` | Tombstone 删除（产生 DELETE Change） |
+| GET | `/branches?parent_note_id=` | 分支列表（sort_order 升序） |
+| GET | `/notes/{note_id}/attributes` | 标签/关系/属性列表 |
+
+> 客户端一切写操作走 Sync 协议（本地 SQLite 事务 → Change → Push）。
+> 服务端 Notes/Branches/Attributes 端点以只读为主（后续按需扩展写端点，须经 Agent 0）。
+
+---
+
+# 4. Blob
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/blobs/init` | 初始化上传：{blob_id, size, mime_type} → EXISTS / CREATED |
+| PUT | `/blobs/{blob_id}/chunks/{index}` | 分片上传（4~16MB），重复分片安全忽略 |
+| POST | `/blobs/{blob_id}/complete` | 完成：服务端重算 SHA-256 与 blob_id 校验 |
+| GET | `/blobs/{blob_id}` | 下载（懒下载队列使用） |
+
+---
+
+# 5. Devices（Phase 6 启用）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/devices` | 设备列表（含 last_seen / revoked_at） |
+| DELETE | `/devices/{device_id}` | 吊销设备 |
+
+---
+
+# 6. 健康检查
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/healthz` | 无认证；返回 `{"status":"ok"}`（部署探活用） |
+
+---
+
+# 7. 通用错误格式
 
 ```json
 {
-  "code": 0,
-  "message": "success",
-  "data": {
-    "serverVersion": 120,
-    "hasMore": false,
-    "notes": [
-      {
-        "noteUuid": "uuid-2",
-        "operation": "UPDATE",
-        "objectVersion": 5,
-        "serverVersion": 118,
-        "title": "Linux 常用命令",
-        "content": "systemctl status nginx",
-        "contentFormat": "MARKDOWN",
-        "summary": "systemctl status nginx",
-        "categoryName": "Linux",
-        "pinned": false,
-        "favorite": false,
-        "archived": false,
-        "deleted": false,
-        "createTime": "2026-05-07T10:00:00",
-        "updateTime": "2026-05-07T16:40:00",
-        "deleteTime": null
-      }
-    ]
-  }
+  "code": "INVALID_CREDENTIALS",
+  "message": "用户名或密码错误"
 }
 ```
 
-The client should apply returned notes in ascending `serverVersion` order and then store the returned top-level `serverVersion` as `last_sync_version`.
-
-Compatibility notes:
-
-- Old HTML notes are still returned with `contentFormat: "HTML"`.
-- Markdown notes keep raw Markdown text in `content`; clients should not HTML-escape it during sync.
+| HTTP | code | 说明 |
+|---|---|---|
+| 400 | INVALID_DATA | 请求体/参数非法 |
+| 401 | UNAUTHORIZED | 未认证 / Token 失效 / 设备吊销 |
+| 403 | DEVICE_REVOKED | 设备已吊销 |
+| 404 | NOT_FOUND | 资源不存在 |
+| 409 | VERSION_CONFLICT | 版本冲突（Push 响应逐条返回 CONFLICT） |
+| 413 | PAYLOAD_TOO_LARGE | Push 超过 8MB |
+| 500 | INTERNAL | 服务端内部错误 |

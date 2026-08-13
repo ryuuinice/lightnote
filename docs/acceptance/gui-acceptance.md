@@ -1,8 +1,8 @@
-# LightNote GUI 延迟验收协议（GUI-001 ~ GUI-008）+ 双设备 E2E 执行包
+# LightNote GUI 延迟验收协议（GUI-001 ~ GUI-008 + AUTH-01 ~ AUTH-06）+ 双设备 E2E 执行包
 
 > **状态：** Deferred Acceptance（延迟验收）  
 > **执行环境：** 带显示器的 Windows 真机（当前开发环境为无头环境，**无法运行 Tauri GUI**）  
-> **目的：** 仅验证「真实用户操作链路」在 Tauri 桌面壳 + Vue UI 下的端到端可用性。
+> **目的：** 仅验证「真实用户操作链路」在 Tauri 桌面壳 + Vue UI 下的端到端可用性，含 Phase 9.2a 客户端 Auth Session（refresh-token / 重启恢复）。
 
 ## 0. 适用范围与分层原则（先读）
 
@@ -26,10 +26,40 @@
 
 1. **真实 IPC 开关**：`client/src/api/ipc.ts` 中 `USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false'`。**必须设置 `VITE_USE_MOCK=false`**，否则前端走 Mock，不会调用 Tauri 命令。
 2. **同步为手动触发**：`client/app/src/main.rs` 无后台自动同步线程（`auto_sync`/`sync_interval_sec` 仅存于内存设置，未驱动定时器）。所有 push/pull 均由用户点击 **「立即同步」**（SyncStatusBar 弹层或命令面板）触发；登录后 `App.vue::onLoggedIn` 会自动触发一次 `sync.trigger`。
-3. **双实例数据隔离**：`main.rs::setup` 用 `app.path().app_data_dir()` 固定为 `%APPDATA%\com.lightnote.app\`（identifier 见 `client/app/tauri.conf.json`）。同 Windows 用户下开两个进程 **共享同一份 `lightnote.db`** → 不能作为两个独立设备。
-   - **单机双设备方案**：使用**两个 Windows 用户账户**分别登录运行客户端（各账户 `%APPDATA%` 独立）。
-   - **或**：使用**两台物理机**。
-   - 未启用 `tauri-plugin-single-instance`（`client/app/Cargo.toml` 无此依赖），故多窗口可启动，但数据目录仍是隔离的关键。
+3. **双实例数据隔离**：`main.rs::setup` 用 `app.path().app_data_dir()` 固定为 `%APPDATA%\com.lightnote.app\`（identifier 见 `client/app/tauri.conf.json`）。同 Windows 用户下开两个进程 **默认共享同一份 `lightnote.db`** → 不能作为两个独立设备。三种隔离方案任选：
+   - **单账户 APPDATA 重定向（推荐，无需改代码）**：第二个实例启动时把进程 `%APPDATA%` 指到别处，`app_data_dir()` 随之落到独立目录。见 §4.1。
+   - **单机双账户**：两个 Windows 用户账户分别登录运行客户端（各账户 `%APPDATA%` 天然独立）。
+   - **两台物理机**：天然隔离，最强验证。
+   - 未启用 `tauri-plugin-single-instance`（`client/app/Cargo.toml` 无此依赖），故多窗口可启动；数据目录隔离仍是关键。
+
+### 1.2 Windows 工具链（一次性安装）
+
+`cargo tauri dev/build` 在 Windows 上的硬依赖；缺任一项会卡在构建期（最常见的卡点是 MSVC 与 WebView2）。
+
+| 工具 | 用途 | 安装 |
+|---|---|---|
+| Visual Studio Build Tools | MSVC C++ 链接器（Tauri Windows 硬依赖） | 安装器勾「Desktop development with C++」 |
+| Rust | `lightnote_app` / `lightnote_core` 编译 | rustup（默认 MSVC toolchain） |
+| Node.js LTS | Vue 前端构建（`vite build`） | nodejs.org |
+| WebView2 Runtime | Tauri 渲染内核 | Win11 自带；Win10 装 Evergreen bootstrapper |
+| **tauri-cli** | `cargo tauri` 子命令 | **`package.json` 未带**，须手装：`cargo install tauri-cli --version "^2.0"` |
+| Go（可选） | 仅当服务端也跑在 Windows 上 | go.dev；服务端放 VPS 则 Windows 不用装 |
+
+> 验证工具链就绪：`rustc -V`、`node -v`、`cargo tauri --version` 都能出版本号。
+
+### 1.3 代码就绪
+
+本地（WSL）领先 VPS 6 commit；先推送再在 Windows 上 clone 到验收基线：
+```bash
+# WSL
+git push vps master --tags            # 带 v1.1-phase9.2a-auth 等锚点
+```
+```powershell
+# Windows
+git clone ssh://root@203.0.113.10/git-workspace/lightnote-dev
+cd lightnote-dev
+git checkout v1.1-phase9.2a-auth      # 锁到验收基线
+```
 
 ---
 
@@ -71,6 +101,8 @@ cargo tauri dev
 cargo tauri build
 # 产物在 client\app\target\release\，双击 LightNote.exe
 ```
+
+> ⚠ **`VITE_USE_MOCK=false` 是 Vite 构建期变量**，必须在 `cargo tauri dev/build` **之前**在同一 shell 设好（`beforeDevCommand`/`beforeBuildCommand` 会跑 `npm run dev/build`→vite 读它）。忘了设 → 前端全程走 Mock，不碰真实 Tauri/服务端，**整个验收白做**。验证：登录后 WebView2 DevTools Network 看不到 `invoke` 失败也看不到真实 HTTP；或 `import.meta.env.VITE_USE_MOCK` 在 Console 为 `"false"`。
 
 - 两个客户端实例的「设备名」分别填 **PC-A** / **PC-B**（见 GUI-001）。
 - 客户端数据目录：`%APPDATA%\com.lightnote.app\`（含 `lightnote.db`、`blobs\`）。
@@ -283,11 +315,23 @@ cargo tauri build
 
 | 方案 | 做法 | 数据隔离 |
 |---|---|---|
-| 单机双账户（推荐） | Windows 账户 U1 运行 PC-A、账户 U2 运行 PC-B，均 `VITE_USE_MOCK=false` | 各自 `%APPDATA%\com.lightnote.app\` 独立 ✅ |
-| 双机 | 两台 Windows 真机，分别运行一个客户端 | 天然隔离 ✅ |
-| 单机单账户双窗口 | 同账户起两个进程 | ❌ 共享同一 `lightnote.db`，**不能**作为双设备 |
+| **单账户 APPDATA 重定向（推荐）** | 实例 A 正常起；实例 B 在 PowerShell 里 `$env:APPDATA="C:\ln-b"` 后再起同一个 exe | 各自 `%APPDATA%\com.lightnote.app\` 独立 ✅（无需改代码） |
+| 单机双账户 | Windows 账户 U1 运行 PC-A、账户 U2 运行 PC-B，均 `VITE_USE_MOCK=false` | 各账户 `%APPDATA%` 天然独立 ✅ |
+| 双机 | 两台 Windows 真机，分别运行一个客户端 | 天然隔离 ✅（最强） |
+| 单机单账户双窗口（不重定向） | 同账户同 `%APPDATA%` 起两个进程 | ❌ 共享同一 `lightnote.db`，**不能**作为双设备 |
 
-> Tauri 无实例 id / 数据目录覆盖参数（`main.rs::setup` 写死 `app_data_dir()`，client_id/device_id 由 `std::process::id()` 派生）。如需单账户双实例隔离，**须改代码**（超出本协议范围，此处不修改）。
+单账户双实例推荐流程（一次 `cargo tauri build`，跑两个独立 exe）：
+```powershell
+# 实例 A（默认数据目录）
+.\client\app\target\release\LightNote.exe
+#   登录：server=http://localhost:8080  admin/admin123  设备名=PC-A
+
+# 实例 B（另开 PowerShell，重定向 APPDATA → 独立 DB + 独立 refresh_token）
+$env:APPDATA = "C:\ln-b"
+.\client\app\target\release\LightNote.exe
+#   登录：同 server，设备名=PC-B
+```
+> 原理：`main.rs::setup` 的 `app.path().app_data_dir()` 在 Windows 解析为 `%APPDATA%\com.lightnote.app`；进程级覆盖 `%APPDATA%` → 数据目录随之落到独立路径。LightNote 仅用该目录存自身数据，覆盖 `%APPDATA%` 安全。`dev` 模式不推荐双开（vite 抢占 5173 端口），双实例统一用 `build` 产物。
 
 ### 4.2 服务端配置（两客户端共享）
 
@@ -349,7 +393,69 @@ Remove-Item -Recurse -Force server\run        # 含 *.db、blobs\
 
 ---
 
-## 5. 分层原则（再次强调）
+## 5. 认证会话验收（AUTH-01 ~ AUTH-06）
+
+Phase 9.2a 接线的客户端 refresh-token / 重启恢复专项。6 条全过即视为 Auth Session 闭环。
+（服务端 `/auth/refresh` 契约见 `docs/api.md` §1.5；客户端实现见 `client/app/src/auth.rs` + `main.rs`。）
+
+### AUTH-01 首次登录
+
+- **前置**：服务端在跑；客户端数据目录为空（首次）。
+- **操作**：启动 PC-A → 填 `http://localhost:8080` / `admin` / `admin123` / 设备名 `PC-A` → 登录。
+- **预期（PASS）**：进入主界面；SyncStatusBar 正常；`%APPDATA%\com.lightnote.app\` 下生成 `session.json`（含 server_url/device_id/device_name）+ `credential`（refresh_token，0600）。
+- **失败（FAIL）**：登录报错；或进了主界面但 `credential`/`session.json` 未生成；或 refresh_token 出现在 Vue/Console（不应暴露）。
+
+### AUTH-02 App 重启 → 自动恢复
+
+- **前置**：AUTH-01 已通过（存在持久化会话）。
+- **操作**：完全关闭 PC-A → 重新启动同一个 exe（**不重新登录**）。
+- **预期（PASS）**：启动后 `App.vue::onMounted` 调 `auth_status`（has_session=true）→ `auth_refresh`（用 refresh_token 换新 access_token）→ 直接进主界面，笔记树与重启前一致。
+- **失败（FAIL）**：重启后回到登录页（refresh 未接线或持久化丢失）；或提示 token 无效。
+
+### AUTH-03 Access Token 过期 → 自动续期
+
+- **前置**：AUTH-01 通过。**为快速验证，把服务端 `LIGHTNOTE_TOKEN_TTL_HOURS` 调小**（如 `1`；若服务端支持小数则 `0.01`≈36s），重启服务端。
+- **操作**：登录后等到 access_token 过期 → 触发任意需 server 的命令（点「立即同步」、或打开设备列表）。
+- **预期（PASS）**：`ensure_valid_token` 检测到过期 → 自动 `auth_refresh` → 命令成功；用户无感（不回登录页）。
+- **失败（FAIL）**：命令报 401/超时；或被踢回登录页（说明过期未自动续）。
+- **等价捷径**：access_token 仅内存，**重启必走 refresh**（AUTH-02）已覆盖同一 `do_refresh` 代码路径；若不便等待过期，AUTH-02 通过即可认为续期链路通，AUTH-03 标记「等价已覆盖」。
+
+### AUTH-04 Refresh Token 轮换
+
+- **前置**：AUTH-01 通过。
+- **操作**：记录 `credential` 文件内容（refresh_token R1）→ 触发一次 refresh（重启 = AUTH-02，或等过期 = AUTH-03）→ 再看 `credential`（应为 R2，≠ R1）→ 用 R1 手工调 `/auth/refresh`：
+  ```bash
+  curl -X POST http://localhost:8080/api/v1/auth/refresh \
+    -H 'Content-Type: application/json' -d '{"refresh_token":"<R1>"}' -i
+  ```
+- **预期（PASS）**：轮换后 `credential` 变成新 token；R1 再用返回 **401 INVALID_REFRESH_TOKEN**（旧 token 立即失效）。
+- **失败（FAIL）**：轮换后 R1 仍可用（未失效 = 安全漏洞）；或 `credential` 未更新（rotation 未存）。
+
+### AUTH-05 Server 设备吊销 → 回登录页
+
+- **前置**：PC-A、PC-B 均登录到同一 server。
+- **操作**：在 PC-A 的设置页对 **PC-B 点「吊销」**（`DELETE /devices/{device_id}`）→ 在 PC-B 触发一次 refresh（重启 PC-B 或等其 access_token 过期）。
+- **预期（PASS）**：PC-B 的 refresh 返回 **403 DEVICE_REVOKED** → 客户端 `clear_session` 清空 access+refresh+元信息 → 回登录页；PC-B 无法再自动恢复。
+- **失败（FAIL）**：PC-B 被吊销后仍能 refresh 成功（吊销未传播 = Phase 6 修过的真实漏洞回归）；或 refresh 失败但未清会话（下次启动仍尝试、无限失败）。
+
+### AUTH-06 Logout
+
+- **前置**：已登录。
+- **操作**：设置页点「退出登录」→ 确认 → 关闭 App → 重启。
+- **预期（PASS）**：退出后 `%APPDATA%\com.lightnote.app\` 下 `credential` 与 `session.json` 均被删；重启后 `auth_status` has_session=false → 回登录页（不能自动登录）。
+- **失败（FAIL）**：退出后 refresh_token 残留（仍可自动登录 = 退出未清干净）。
+
+---
+
+## 6. 常见坑（先看）
+
+1. **`VITE_USE_MOCK=false` 没设 / 设错 shell** → 前端走 Mock，整轮验收白做（见 §2.2 警告）。
+2. **双实例没隔离 APPDATA** → 两窗口共用一个 `lightnote.db`，A=B 永远同步成功（假象）。必须按 §4.1 重定向。
+3. **MSVC C++ / WebView2 没装** → `cargo tauri build` link 失败或启动白屏，报错不像缺依赖容易卡住（见 §1.2）。
+
+---
+
+## 7. 分层原则（再次强调）
 
 - 本协议 = **真机用户操作链路** 验收，**不是** DB / 同步正确性复测。
 - 下列正确性已由自动化测试全绿覆盖，本协议**不得**用以反推其结论：

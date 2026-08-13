@@ -183,9 +183,9 @@ fn migration_creates_all_tables_and_is_idempotent() {
     ] {
         assert!(test_table_exists(db.connection(), table), "table {table} missing");
     }
-    assert_eq!(migration::current_version(db.connection()).unwrap(), 3);
+    assert_eq!(migration::current_version(db.connection()).unwrap(), 4);
     let db2 = Db::open(&path, &blob_dir).expect("reopen");
-    assert_eq!(migration::current_version(db2.connection()).unwrap(), 3);
+    assert_eq!(migration::current_version(db2.connection()).unwrap(), 4);
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn migration_reapplies_after_partial_failure() {
         .unwrap();
     migration::migrate(&mut conn).unwrap();
     assert!(test_table_exists(&conn, "note_fts"));
-    assert_eq!(migration::current_version(&conn).unwrap(), 3);
+    assert_eq!(migration::current_version(&conn).unwrap(), 4);
 }
 
 #[test]

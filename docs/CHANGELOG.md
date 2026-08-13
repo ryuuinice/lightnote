@@ -3,6 +3,56 @@
 本文件记录 LightNote v1.1 重构（Rust + Go + Tauri）的阶段性基线。
 架构基线见 `docs/architecture/LightNote技术架构设计v1.1.md`；开发计划见 `docs/architecture/LightNoteV1.2AI多代理开发计划.md`。
 
+## v1.1-phase8-performance — 性能基线 + FTS 规模化修复
+
+Phase 8 性能验收：建立 measure-only 性能基线工具，定位并修复一个 FTS 规模化缺陷，
+§44 全部 4 个可在无头环境测量的 Gate 在 1K/10K/**100K** 三档均通过。
+
+### 性能 Gate（§44，无头环境实测）
+
+| 指标 | 1K | 10K | 100K | Gate | 状态 |
+|---|---:|---:|---:|---|---|
+| Tree 加载 list_notes(root) | 1.0ms | 12ms | 105ms | <200ms | ✅ |
+| Note 保存 save_content | 6.7ms | 11ms | 6.9ms | <50ms | ✅ |
+| FTS 最差查询 | 3.0ms | 15ms | 88ms | <200ms | ✅ |
+| 增量同步 A→B (1 note) | 37ms | 38ms | 36ms | <1s | ✅ |
+
+> “10,000 Notes 流畅”硬 Gate 与 “100,000 Notes 可用”软 Gate 均达成。
+
+### FTS 规模化修复（Phase 8.4）
+
+- 根因：`fts::sync_note` 通过 `DELETE FROM note_fts WHERE note_id = ?` 删除旧行，而 `note_id`
+  在 schema 中为 `UNINDEXED` → FTS5 无法走倒排索引 → 每次 DELETE 全表扫描 → 单次 O(n)、批量 O(n²)。
+  经 Phase 8.2 对照实验隔离（CJK/English/repeated/random 分词均平稳；仅 DELETE 模式超线性）锁定。
+- 修复（最小机制）：`note_fts.rowid = notes.rowid`；`sync_note` 先 `SELECT rowid FROM notes WHERE note_id=?`
+  （索引），再 `DELETE … WHERE rowid=?`、`INSERT … (rowid,…)`；`trash_empty` 在物理删除前调
+  `fts::remove_note` 清理 FTS 行。V4 迁移 DROP + CREATE + rebuild_all。
+- 效果：FTS 写入随规模由超线性（30K 增长 12×）变为平稳（~100ms/window，~150× 提升且零增长）；
+  `save_content` 在 100K 与 1K 基本一致（6.9ms vs 6.7ms，无规模退化）。
+- 防回归测试：`tests/hardening/tests/fts_scaling.rs` 断言 `sync_note` 单次耗时在 1K/8K FTS 规模下
+  不出现 O(n) 增长（捕获任何未来“按非 rowid 键删除/定位 FTS”的回退）。
+
+### 性能观察项（非 Gate 阻塞）
+
+At 100K notes, high-frequency CJK FTS queries（如「架构」「项目」）may take ~80ms due to large
+posting lists + rank ordering; low-frequency tokens ~5ms. Remains below the <200ms search gate and
+is therefore **not** a Phase 8 blocker. Query-side optimization deferred.
+
+### Phase 8 工具（tests/perf/，measure-only）
+
+`lightnote-perf` crate：基线 runner（`main`）+ 三个诊断探针（`diagnose` seed 分段、`grow` per-step 增长、
+`fts_probe`/`fts_delete` FTS 根因隔离）。仅调用 `lightnote_core` 公共 API，不改生产代码（除 8.4 已合入的 FTS 修复）。
+
+### 约束遵守
+
+未触动：CJK tokenizer / FTS 引擎 / SQLite driver / Sync Engine / Schema 业务语义 / Repository 架构 / 异步 FTS。
+
+### Deferred（Phase 9）
+
+- Tauri/Vue/UI 冷启动 + 渲染（真实 Windows 环境实测）
+- 服务端 Push/Pull 大规模吞吐（100K 全量首同步）
+- GUI-001~008 双设备真机 E2E
+
 ## v1.1-phase7 — 同步核心稳定基线
 
 首个将 v1.1 重构纳入 Git 的检查点。同步核心、认证、设备、UI 全链路打通；

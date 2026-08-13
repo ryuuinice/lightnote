@@ -1,0 +1,11 @@
+[package]
+name = "lightnote-perf"
+version = "0.1.0"
+edition = "2021"
+description = "LightNote Phase 8 performance baseline runner (measure-only, no core edits)"
+default-run = "lightnote-perf"
+
+[dependencies]
+lightnote_core = { path = "../../client/src-tauri" }
+lightnote_slice = { package = "lightnote-slice", path = "../vertical-slice" }
+tempfile = "3.27.0"

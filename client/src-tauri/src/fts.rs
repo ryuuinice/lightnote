@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::models::SearchResult;
 use crate::repo;
 use crate::util::is_cjk;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 /// CJK 字符间插入空格，使 unicode61 将每个汉字拆为独立 token
 /// "所有权是Rust" → "所 有 权 是 Rust"
@@ -25,8 +25,26 @@ fn cjk_space(text: &str) -> String {
 }
 
 /// FTS5 本地派生索引（title + blob 正文 + 标签名），由变更事务内同步维护
+///
+/// 行键：note_fts.rowid = notes.rowid。note_id 在 schema 中为 UNINDEXED，
+/// 按 note_id 删除/定位会触发 FTS5 全表扫描（O(n)）；改用 notes.rowid 作行键后
+/// DELETE/INSERT 均为 O(log n)，消除批量写入路径（seed / 初始 Pull / 每次 save）的 O(n²)。
+/// notes 行键稳定性：note_id 为 TEXT PK（隐式 rowid），更新走 UPSERT、删除走 tombstone，
+/// 物理删除仅在 trash_empty 发生（此时由 remove_note 同步清理 FTS 行）。
 pub fn sync_note(conn: &Connection, note_id: &str) -> Result<()> {
-    conn.execute("DELETE FROM note_fts WHERE note_id = ?1", rusqlite::params![note_id])?;
+    let rid: Option<i64> = conn
+        .query_row(
+            "SELECT rowid FROM notes WHERE note_id = ?1",
+            rusqlite::params![note_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(rid) = rid else {
+        // note 不存在：FTS 残行（如有）由 trash_empty 的 remove_note 清理；
+        // search 侧 get_note 亦会跳过指向已删除 note 的残行。
+        return Ok(());
+    };
+    conn.execute("DELETE FROM note_fts WHERE rowid = ?1", rusqlite::params![rid])?;
     let Some(note) = repo::get_note(conn, note_id)? else {
         return Ok(());
     };
@@ -46,9 +64,25 @@ pub fn sync_note(conn: &Connection, note_id: &str) -> Result<()> {
     let content = cjk_space(&content);
     let tags = repo::list_tag_names(conn, note_id)?;
     conn.execute(
-        "INSERT INTO note_fts (note_id, title, content, tags) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![note.note_id, cjk_space(&note.title), content, tags.join(" ")],
+        "INSERT INTO note_fts (rowid, note_id, title, content, tags) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![rid, note.note_id, cjk_space(&note.title), content, tags.join(" ")],
     )?;
+    Ok(())
+}
+
+/// 物理删除 note（trash_empty）前清理其 FTS 行。按 notes.rowid 定位，O(log n)。
+/// 必须在 repo::delete_note_row 之前调用（依赖 notes.rowid 查询）。
+pub fn remove_note(conn: &Connection, note_id: &str) -> Result<()> {
+    let rid: Option<i64> = conn
+        .query_row(
+            "SELECT rowid FROM notes WHERE note_id = ?1",
+            rusqlite::params![note_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(rid) = rid {
+        conn.execute("DELETE FROM note_fts WHERE rowid = ?1", rusqlite::params![rid])?;
+    }
     Ok(())
 }
 
@@ -167,7 +201,7 @@ fn make_snippet(content: &str, token: &str) -> String {
         let end = (idx + token.len() + 40).min(content.len());
         let mut out: String = content.chars().skip(start).take(end - start).collect();
         if start > 0 {
-            out.insert_str(0, "…");
+            out.insert(0, '…');
         }
         if end < content.len() {
             out.push('…');

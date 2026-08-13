@@ -177,7 +177,7 @@ pub fn find_branch_for_note(conn: &Connection, note_id: &str) -> Result<Option<B
     let mut rows = stmt.query_map(rusqlite::params![note_id], row_to_branch)?;
     rows.next()
         .transpose()
-        .map_err(|e| crate::Error::Database(e))
+        .map_err(crate::Error::Database)
 }
 
 pub fn get_branch(conn: &Connection, branch_id: &str) -> Result<Option<Branch>> {

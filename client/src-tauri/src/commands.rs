@@ -480,6 +480,7 @@ impl Core {
         let tx = self.db.tx()?;
         let mut deleted = 0;
         for note in &trashed {
+            fts::remove_note(&tx, &note.note_id)?;
             repo::delete_note_row(&tx, &note.note_id)?;
             deleted += 1;
         }
@@ -534,10 +535,7 @@ impl Core {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut uploaded = 0;
         for blob_id in ids {
-            match self.blob_manager.upload(transport, &blob_id, None) {
-                Ok(true) => uploaded += 1,
-                _ => {}
-            }
+            if let Ok(true) = self.blob_manager.upload(transport, &blob_id, None) { uploaded += 1 }
         }
         Ok(uploaded)
     }

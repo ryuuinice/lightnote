@@ -3,6 +3,42 @@
 本文件记录 LightNote v1.1 重构（Rust + Go + Tauri）的阶段性基线。
 架构基线见 `docs/architecture/LightNote技术架构设计v1.1.md`；开发计划见 `docs/architecture/LightNoteV1.2AI多代理开发计划.md`。
 
+## v1.1-phase9.2 — 同步大规模吞吐基线 + GUI 验收协议
+
+Phase 9 第一项可自动化交付：服务端/同步大规模吞吐基准（measure-only）+ Deferred GUI 验收协议。
+正确性、资源、性能三维度在 1K/10K/100K 全部验证。
+
+### 吞吐结果（tests/perf/src/bin/throughput.rs）
+
+| 场景 | 1K | 10K | 100K |
+|---|---:|---:|---:|
+| Push (chg/s) | 775 | 647 | 709 |
+| Pull/Apply/FTS (chg/s) | 2649 | 9195 | 10521 |
+| **Pull 总时（新设备首同步）** | 0.4s | 1.1s | **9.5s** |
+| Push 总时 | 1.3s | 15.5s | 141s |
+| server RSS / client RSS | 25/11MB | 30/12MB | **31/12MB（平稳）** |
+
+- **新设备首同步 100K Notes = 9.5 秒**（10521 chg/s，含 Apply + FTS 构建）—— 真实大数据场景达标。
+- 内存零膨胀（1K→100K server/client RSS 平稳）。
+- 正确性 P0：0 丢失 / 0 重复 / cursor 正确 / outbox 清空 / FTS 可搜 / 幂等。
+
+### Deferred：PERF-001（Server Push per-change fsync）
+
+100K Push = 141s（~709 chg/s，吞吐平稳）。瓶颈为 `server/internal/sync/push.go` 的 `PushService` 逐条
+`Committer.Commit`，每条一个事务/一次 fsync。**非正常用户路径**（用户每次编辑只推几条 change），
+仅影响 bulk 导入/迁移/大规模离线回灌。**Status: Deferred (P2)**；后续批量 server-side commit 时重新 benchmark。
+
+### Deferred：GUI-001~008（Windows 真机）
+
+`docs/acceptance/gui-acceptance.md`：完整 Deferred 验收协议（登录/双向 Pull/删除/冲突/Blob/离线恢复/重启恢复）
++ 双设备 E2E 执行包。本无头环境不可执行；待 Windows 显示环境一次性验收。
+
+### 已发现 Client 集成缺口（→ Phase 9.2a 跟进）
+
+客户端 Tauri shell（`client/app/src/main.rs`）**未接入 refresh-token**：`auth_login` 仅取 access_token 入内存，
+丢弃 refresh_token / device_id；未注册 `auth_refresh`；token 仅内存（重启即失效）。服务端 Phase 6 refresh-token
+轮换 + 设备吊销完整，但客户端从未接线 → GUI-008（重启恢复）与 2h token 过期场景受阻。Phase 9.2a 修复。
+
 ## v1.1-phase8-performance — 性能基线 + FTS 规模化修复
 
 Phase 8 性能验收：建立 measure-only 性能基线工具，定位并修复一个 FTS 规模化缺陷，

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useNotesStore } from './store/notes'
-import { ipc } from './api/ipc'
+import { authRefresh, authStatus, ipc } from './api/ipc'
 import LoginView from './components/LoginView.vue'
 import TreeView from './components/TreeView.vue'
 import NoteList from './components/NoteList.vue'
@@ -21,7 +21,16 @@ const loading = ref(true)
 onMounted(async () => {
   try {
     await store.loadSettings()
-    if (!store.settings.serverUrl) {
+    // 启动恢复：若存在持久化会话，用 refresh_token 换新 access_token 后直接进主界面
+    const status = await authStatus()
+    if (status.has_session) {
+      try {
+        await authRefresh()
+      } catch {
+        needsLogin.value = true
+        return
+      }
+    } else {
       needsLogin.value = true
       return
     }

@@ -115,7 +115,7 @@ cargo tauri build
 **日志采集**：
 - 客户端：DevTools Console（F12，开发模式）；`auth_login` 失败时前端 `error.value` 文案。
 - 服务端：`server.log` 中 `/api/v1/auth/login` 行。
-- 备注：access_token / refresh_token / device_id 在当前 Tauri 壳仅取 `access_token`（`main.rs:107`），**refresh_token / device_id 未被持久化**，相关留存行为 **需在真机确认**。
+- 备注：Phase 9.2a 起 `auth_login` 同时处理 `access_token`（内存）/`refresh_token`（TokenStore，0600 凭据文件）/`device_id`（session.json），全部持久化（除 access_token 仅内存）。登录链路在真机确认。
 
 ---
 
@@ -273,8 +273,7 @@ cargo tauri build
 
 **日志采集**：两次启动的 Console；服务端 `/sync/changes?after=` 的 `after` 值（应为上次 cursor，非 0）。
 
-> 关键说明（源自源码）：`main.rs::AppState` 中 `token` / `settings` / `server_url` 均为内存 `Mutex`，**未持久化到磁盘**；重启后 `settings.server_url=""` → `App.vue::onMounted` 判定 `needsLogin=true` → **每次启动都需重新登录**。
-> 至于 access_token 过期后的 **refresh-token 轮换**：当前 Tauri 壳**未注册 `auth_refresh` 命令**（`invoke_handler` 列表无此项，`main.rs:343-372`），`auth_login` 也未保存 `refresh_token`。因此 GUI 内的 refresh 轮换 **当前未接线，需在真机确认**（服务端 `/auth/refresh` 已实现，见 `docs/api.md` §1.5、CHANGELOG Phase 6，但客户端壳尚未调用）。
+> 关键说明（Phase 9.2a 已接线）：`auth_login` 现持久化 `refresh_token`（TokenStore，0600 凭据文件）+ `server_url`/`device_id`/`device_name`（session.json）；`access_token` 仅内存 + 记 `expires_in`。启动时 `App.vue::onMounted` 调 `auth_status` → 若有会话则 `auth_refresh`（用 refresh_token 换新 access_token + 轮换存新 refresh_token）→ 进主界面；失败（401/403）→ 回登录页。运行期 `sync.trigger`/`devices.*` 前置 `ensure_valid_token`，access_token 过期自动 refresh。`settings.logout` 清空全部会话。GUI-008 现已具备验收条件（真机确认 refresh 链路 + 2h 过期自动续）。
 
 ---
 

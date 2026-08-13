@@ -1,12 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod auth;
+
+use auth::{parse_login_response, parse_refresh_response, FileCredentialStore, SessionMeta, TokenStore};
 use lightnote_core::blob::UreqBlobTransport;
 use lightnote_core::commands::Core;
 use lightnote_core::engine::SyncEngine;
 use lightnote_core::models::{Attribute, ConflictInfo, Note, NoteMeta, SearchResult, SyncStatus};
 use lightnote_core::sync::UreqTransport;
+use lightnote_core::util::now_ms;
 use serde::Serialize;
+use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{Manager, State};
 
 struct AppState {
@@ -14,10 +20,14 @@ struct AppState {
     engine: Mutex<Option<SyncEngine>>,
     blob_transport: Mutex<Option<UreqBlobTransport>>,
     server_url: Mutex<String>,
-    token: Mutex<String>,
+    token: Mutex<String>,        // access_token，仅内存
+    token_expiry: Mutex<i64>,    // access_token 到期 unix ms；0 = 未知/已过期
+    device_id: Mutex<String>,
     device_name: Mutex<String>,
     client_id: Mutex<String>,
     settings: Mutex<AppSettings>,
+    data_dir: Mutex<PathBuf>,    // app_data_dir；session.json / credential 落此
+    token_store: Mutex<Option<Box<dyn TokenStore>>>, // 启动时在 setup 注入
 }
 
 #[derive(Serialize, Clone)]
@@ -77,9 +87,112 @@ fn run_sync(state: &State<AppState>) -> lightnote_core::Result<lightnote_core::e
     with_core(state, |core| core.sync_trigger_with_blob(engine, blob))
 }
 
+/// 令 access_token 作废后必须重建 engine/blob transport（它们持有旧 token）。
+fn rebuild_transports(state: &State<AppState>) {
+    *state.engine.lock().expect("engine lock") = None;
+    *state.blob_transport.lock().expect("blob lock") = None;
+}
+
+/// 清空全部会话状态（access+refresh+元信息），回到登录页。refresh 失败 / logout 调用。
+fn clear_session(state: &State<AppState>) {
+    let dir = state.data_dir.lock().expect("dir lock").clone();
+    if let Some(ts) = state.token_store.lock().expect("ts lock").as_ref() {
+        let _ = ts.clear_refresh();
+    }
+    SessionMeta::clear(&dir);
+    *state.token.lock().expect("token lock") = String::new();
+    *state.token_expiry.lock().expect("expiry lock") = 0;
+    *state.device_id.lock().expect("dev id lock") = String::new();
+    *state.server_url.lock().expect("url lock") = String::new();
+    let mut s = state.settings.lock().expect("settings lock");
+    s.server_url = String::new();
+    rebuild_transports(state);
+}
+
+/// 用持久化的 refresh_token 换新 access_token（轮换：同时存新 refresh_token）。
+/// 401/403（无效/吊销）→ 清会话；网络错误 → 不清（瞬时）。
+fn do_refresh(state: &State<AppState>) -> Result<(), String> {
+    let refresh_token = {
+        let ts = state.token_store.lock().expect("ts lock");
+        let ts = ts.as_ref().ok_or_else(|| "token store not ready".to_string())?;
+        ts.load_refresh().map_err(|e| e.to_string())?
+    };
+    let Some(rt) = refresh_token else {
+        clear_session(state);
+        return Err("no refresh token".into());
+    };
+    let url = state.server_url.lock().expect("url lock").clone();
+    let resp = ureq::post(&format!("{url}/api/v1/auth/refresh"))
+        .timeout(Duration::from_secs(10))
+        .send_json(serde_json::json!({ "refresh_token": rt }));
+    match resp {
+        Ok(r) if r.status() == 200 => {
+            let v: serde_json::Value = r.into_json().map_err(|e| e.to_string())?;
+            let t = parse_refresh_response(&v)?;
+            *state.token.lock().expect("token lock") = t.access_token;
+            *state.token_expiry.lock().expect("expiry lock") = now_ms() + t.expires_in * 1000;
+            if let Some(new_rt) = t.refresh_token {
+                let ts = state.token_store.lock().expect("ts lock");
+                if let Some(ts) = ts.as_ref() {
+                    ts.save_refresh(&new_rt).map_err(|e| e.to_string())?;
+                }
+            }
+            rebuild_transports(state);
+            Ok(())
+        }
+        Ok(r) => {
+            // 401 INVALID_REFRESH_TOKEN / 403 DEVICE_REVOKED / 400：会话不可恢复
+            clear_session(state);
+            Err(format!("refresh failed: {}", r.status()))
+        }
+        Err(e) => Err(e.to_string()), // 网络瞬时错误：不清会话
+    }
+}
+
+/// 调任何需要 server 的命令前确保 access_token 有效；过期则自动 refresh。
+fn ensure_valid_token(state: &State<AppState>) -> Result<(), String> {
+    let now = now_ms();
+    let expiry = *state.token_expiry.lock().expect("expiry lock");
+    let has_token = !state.token.lock().expect("token lock").is_empty();
+    if has_token && expiry > now {
+        return Ok(());
+    }
+    do_refresh(state)
+}
+
 // ---------------------------------------------------------------------------
 // Auth / Settings
 // ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone)]
+struct AuthStatus {
+    has_session: bool, // 是否存在可恢复会话（有 refresh_token 且有 server_url）
+    server_url: String,
+    device_name: String,
+}
+
+#[tauri::command]
+fn auth_status(state: State<AppState>) -> Result<AuthStatus, String> {
+    let has_refresh = state
+        .token_store
+        .lock()
+        .expect("ts lock")
+        .as_ref()
+        .map(|ts| ts.load_refresh().unwrap_or(None).is_some())
+        .unwrap_or(false);
+    let server_url = state.server_url.lock().expect("url lock").clone();
+    let device_name = state.device_name.lock().expect("dev lock").clone();
+    Ok(AuthStatus {
+        has_session: has_refresh && !server_url.is_empty(),
+        server_url,
+        device_name,
+    })
+}
+
+#[tauri::command]
+fn auth_refresh(state: State<AppState>) -> Result<String, String> {
+    do_refresh(&state).map(|_| "ok".to_string())
+}
 
 #[tauri::command]
 fn auth_login(
@@ -89,7 +202,8 @@ fn auth_login(
     password: String,
     device_name: String,
 ) -> Result<String, String> {
-    let url = format!("{}/api/v1/auth/login", server_url.trim_end_matches('/'));
+    let base = server_url.trim_end_matches('/').to_string();
+    let url = format!("{base}/api/v1/auth/login");
     let body = serde_json::json!({
         "username": username,
         "password": password,
@@ -97,22 +211,36 @@ fn auth_login(
         "device_type": "desktop",
     });
     let resp = ureq::post(&url)
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(Duration::from_secs(10))
         .send_json(body)
         .map_err(|e| e.to_string())?;
     if resp.status() != 200 {
         return Err(format!("login failed: {}", resp.status()));
     }
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-    let token = v["access_token"].as_str().unwrap_or_default().to_string();
-    if token.is_empty() {
-        return Err("no access_token in response".to_string());
+    let t = parse_login_response(&v)?;
+
+    let dir = state.data_dir.lock().expect("dir lock").clone();
+    let meta = SessionMeta {
+        server_url: base.clone(),
+        device_id: t.device_id.clone().unwrap_or_default(),
+        device_name: device_name.clone(),
+    };
+    meta.save(&dir).map_err(|e| e.to_string())?;
+    if let Some(rt) = &t.refresh_token {
+        let ts = state.token_store.lock().expect("ts lock");
+        if let Some(ts) = ts.as_ref() {
+            ts.save_refresh(rt).map_err(|e| e.to_string())?;
+        }
     }
-    *state.server_url.lock().expect("url lock") = server_url.trim_end_matches('/').to_string();
-    *state.token.lock().expect("token lock") = token;
+    *state.server_url.lock().expect("url lock") = base.clone();
+    *state.token.lock().expect("token lock") = t.access_token;
+    *state.token_expiry.lock().expect("expiry lock") = now_ms() + t.expires_in * 1000;
+    *state.device_id.lock().expect("dev id lock") = t.device_id.unwrap_or_default();
     *state.device_name.lock().expect("dev lock") = device_name;
     let mut settings = state.settings.lock().expect("settings lock");
-    settings.server_url = server_url.trim_end_matches('/').to_string();
+    settings.server_url = base;
+    rebuild_transports(&state);
     Ok("ok".to_string())
 }
 
@@ -262,16 +390,13 @@ fn blobs_exists(state: State<AppState>, blob_id: String) -> Result<bool, String>
 
 #[tauri::command]
 fn settings_logout(state: State<AppState>) -> Result<(), String> {
-    *state.token.lock().expect("token lock") = String::new();
-    let mut engine = state.engine.lock().expect("engine lock");
-    *engine = None;
-    let mut blob = state.blob_transport.lock().expect("blob lock");
-    *blob = None;
+    clear_session(&state);
     Ok(())
 }
 
 #[tauri::command]
 fn devices_list(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
+    ensure_valid_token(&state)?;
     let url = state.server_url.lock().expect("url lock").clone();
     let token = state.token.lock().expect("token lock").clone();
     if url.is_empty() || token.is_empty() {
@@ -279,7 +404,7 @@ fn devices_list(state: State<AppState>) -> Result<Vec<serde_json::Value>, String
     }
     let resp = ureq::get(&format!("{url}/api/v1/devices"))
         .set("Authorization", &format!("Bearer {token}"))
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(Duration::from_secs(10))
         .call()
         .map_err(|e| e.to_string())?;
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
@@ -288,11 +413,12 @@ fn devices_list(state: State<AppState>) -> Result<Vec<serde_json::Value>, String
 
 #[tauri::command]
 fn devices_revoke(state: State<AppState>, device_id: String) -> Result<(), String> {
+    ensure_valid_token(&state)?;
     let url = state.server_url.lock().expect("url lock").clone();
     let token = state.token.lock().expect("token lock").clone();
     let resp = ureq::delete(&format!("{url}/api/v1/devices/{device_id}"))
         .set("Authorization", &format!("Bearer {token}"))
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(Duration::from_secs(10))
         .call()
         .map_err(|e| e.to_string())?;
     if resp.status() != 200 {
@@ -322,6 +448,7 @@ fn sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 
 #[tauri::command]
 fn sync_trigger(state: State<AppState>) -> Result<String, String> {
+    ensure_valid_token(&state)?;
     run_sync(&state).map(|r| format!("pushed={} pulled={} cursor={}", r.pushed, r.pulled, r.cursor))
         .map_err(|e| e.to_string())
 }
@@ -333,15 +460,21 @@ fn main() {
         blob_transport: Mutex::new(None),
         server_url: Mutex::new(String::new()),
         token: Mutex::new(String::new()),
+        token_expiry: Mutex::new(0),
+        device_id: Mutex::new(String::new()),
         device_name: Mutex::new(String::new()),
         client_id: Mutex::new(format!("client-{:?}", std::process::id())),
         settings: Mutex::new(AppSettings::default()),
+        data_dir: Mutex::new(std::env::temp_dir().join("lightnote-data")),
+        token_store: Mutex::new(None),
     };
 
     tauri::Builder::default()
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             auth_login,
+            auth_status,
+            auth_refresh,
             settings_get,
             settings_update,
             notes_list,
@@ -378,6 +511,18 @@ fn main() {
             let db_path = dir.join("lightnote.db");
             let blobs_path = dir.join("blobs");
             let state = app.state::<AppState>();
+            // 注入凭据存储 + 记录数据目录
+            *state.data_dir.lock().expect("dir lock") = dir.clone();
+            *state.token_store.lock().expect("ts lock") =
+                Some(Box::new(FileCredentialStore::new(&dir)));
+            // 启动恢复：把上次会话的元信息载入内存（access_token 留给 Vue 调 auth_refresh 换取）
+            if let Some(meta) = SessionMeta::load(&dir) {
+                *state.server_url.lock().expect("url lock") = meta.server_url.clone();
+                *state.device_id.lock().expect("dev id lock") = meta.device_id;
+                *state.device_name.lock().expect("dev lock") = meta.device_name;
+                let mut s = state.settings.lock().expect("settings lock");
+                s.server_url = meta.server_url;
+            }
             let mut guard = state.core.lock().expect("core lock poisoned");
             *guard = Some(
                 Core::open(

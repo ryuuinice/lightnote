@@ -61,7 +61,27 @@ client/src/api/ipc.ts 的 COMMAND_MAP 做映射：
 
 ```text
 auth_login(serverUrl, username, password, deviceName)
-  → 调服务端 POST /api/v1/auth/login，缓存 token，构造 SyncEngine + BlobTransport
+  → POST /api/v1/auth/login；持久化 server_url/device_id/device_name（session.json）
+    + refresh_token（TokenStore，0600 凭据文件，非 SQLite 非 webview）；
+    access_token 仅内存 + 记 expires_in；重建 SyncEngine + BlobTransport
+
+auth_status() → AuthStatus { has_session, server_url, device_name }
+  → 启动恢复探测：是否存在可恢复会话（持久化 refresh_token + server_url）。不发网络请求。
+
+auth_refresh() → 用持久化 refresh_token 调 POST /api/v1/auth/refresh，换新 access_token
+  + 存轮换后的新 refresh_token；成功后重建 transports。
+  401/403（无效/设备吊销）→ 清空全部会话状态 → Vue 回登录页。
+```
+
+会话生命周期（Phase 9.2a）：
+
+```text
+启动：auth_status
+  ├─ has_session → auth_refresh → 成功进主界面 / 失败回登录
+  └─ 无会话                → 登录页
+运行期：sync.trigger / devices.* 前置 ensure_valid_token
+  └─ access_token 过期 → 自动 auth_refresh（轮换）→ 继续
+退出：settings.logout → 清空 access + refresh + 元信息 → 登录页
 ```
 
 Vue 侧调用示例（Tauri）：

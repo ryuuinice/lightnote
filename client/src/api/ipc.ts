@@ -54,3 +54,23 @@ export async function authLogin(serverUrl: string, username: string, password: s
   await invoke('auth_login', { serverUrl, username, password, deviceName })
 }
 
+export interface AuthStatus {
+  has_session: boolean
+  server_url: string
+  device_name: string
+}
+
+// 启动恢复：查询是否存在可恢复会话（持久化的 refresh_token + server_url）
+export async function authStatus(): Promise<AuthStatus> {
+  if (USE_MOCK) return { has_session: false, server_url: '', device_name: '' }
+  const { invoke } = await import('@tauri-apps/api/core')
+  return invoke<AuthStatus>('auth_status')
+}
+
+// 用持久化 refresh_token 换新 access_token（轮换）；失败（401/403）= 需重新登录
+export async function authRefresh(): Promise<void> {
+  if (USE_MOCK) return
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('auth_refresh')
+}
+

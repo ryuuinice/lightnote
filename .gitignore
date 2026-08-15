@@ -2,6 +2,12 @@
 # 非锚定：匹配任意深度的 target/（含 tests/*/target、client/app/target）
 target/
 
+# ─── Tauri 生成物 ─────────────────────────────────────────────
+**/gen/schemas/
+
+# ─── 根目录遗留大文件（应用图标已在 client/app/icons/）────────
+/icon.png
+
 # ─── Node / Vite ──────────────────────────────────────────────
 node_modules/
 dist/

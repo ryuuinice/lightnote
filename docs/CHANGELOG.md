@@ -151,4 +151,4 @@ is therefore **not** a Phase 8 blocker. Query-side optimization deferred.
 
 ### 已知非阻塞（v1.2 backlog）
 
-CONFLICT 后对账机制、PERF-001 批量 push、服务端错误日志、refresh token 清理、blob 会话 TTL、设置持久化、auto_sync 死开关、NSIS 可执行名 lightnote_app.exe 与产品名不一致。
+CONFLICT 后对账机制、PERF-001 批量 push、服务端错误日志、refresh token 过期条目的生命周期清理策略（注：吊销/登出路径的凭据清除已由 AUTH-05~08 验证通过，此项仅为服务端过期条目 GC 优化）、blob 会话 TTL、设置持久化、auto_sync 死开关、NSIS 可执行名 lightnote_app.exe 与产品名不一致。

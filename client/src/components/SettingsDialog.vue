@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useNotesStore } from '../store/notes'
-import { ipc } from '../api/ipc'
+import { authStatus, ipc } from '../api/ipc'
 import type { Device } from '../types'
 
 const store = useNotesStore()
@@ -10,10 +10,15 @@ const autoSync = ref(store.settings.autoSync)
 const interval = ref(store.settings.syncIntervalSec)
 const devices = ref<Device[]>([])
 const devicesLoaded = ref(false)
+const currentDeviceId = ref('')
 
 const emit = defineEmits<{ close: []; logout: [] }>()
 
 onMounted(async () => {
+  // GUI-009：获取当前设备 ID，设备列表据此标记「本机」
+  await authStatus()
+    .then((s) => { currentDeviceId.value = s.device_id })
+    .catch(() => undefined)
   devices.value = await ipc.invoke('devices.list').catch(() => [])
   devicesLoaded.value = true
 })
@@ -62,10 +67,11 @@ function fmtTime(ts?: number): string {
       <div v-else class="devices">
         <div v-for="d in devices" :key="d.deviceId" class="device">
           <div class="dev-main">
-            <span class="dev-name">{{ d.deviceName }}</span>
+            <span class="dev-name">{{ d.deviceName }} <span v-if="d.deviceId === currentDeviceId" class="dev-self">（本机）</span></span>
             <span class="dev-meta">{{ d.deviceType || 'desktop' }} · 最后在线 {{ fmtTime(d.lastSeen) }}</span>
           </div>
-          <button v-if="!d.revokedAt" class="revoke" @click="onRevoke(d.deviceId)">吊销</button>
+          <span v-if="d.deviceId === currentDeviceId" class="dev-self">当前设备</span>
+          <button v-else-if="!d.revokedAt" class="revoke" @click="onRevoke(d.deviceId)">吊销</button>
           <span v-else class="revoked">已吊销</span>
         </div>
         <div v-if="devices.length === 0" class="dev-hint">暂无其他设备</div>
@@ -168,6 +174,11 @@ label.row {
 .revoked {
   font-size: 12px;
   color: #999;
+}
+
+.dev-self {
+  font-size: 12px;
+  color: #1a73e8;
 }
 
 .dev-hint {

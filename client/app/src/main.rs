@@ -156,7 +156,7 @@ fn do_refresh(state: &State<AppState>) -> Result<(), String> {
         Err(ureq::Error::Status(code, _)) => {
             // 400 INVALID_REFRESH_TOKEN / 401 / 403 DEVICE_REVOKED：会话不可恢复，清本地凭据。
             // 注意 ureq 2.x 非 2xx 返回 Err(Status(..)) 而非 Ok(response)，须在此分支处理。
-            if code == 400 || code == 401 || code == 403 {
+            if refresh_failure_is_fatal(code) {
                 clear_session(state);
             }
             // 5xx 等其他状态视为瞬时错误：不清会话
@@ -177,6 +177,35 @@ fn ensure_valid_token(state: &State<AppState>) -> Result<(), String> {
     do_refresh(state)
 }
 
+/// refresh 失败是否不可恢复（须清除本地会话与凭据文件）。
+/// 400 INVALID_REFRESH_TOKEN / 401 / 403 DEVICE_REVOKED = 不可恢复；
+/// 5xx 与网络错误 = 瞬时，保留会话。AUTH-07/08 回归锚点。
+fn refresh_failure_is_fatal(code: u16) -> bool {
+    matches!(code, 400 | 401 | 403)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refresh_failure_is_fatal;
+
+    #[test]
+    fn fatal_refresh_failures_clear_session() {
+        // 400/401/403 → 必须清会话（含磁盘凭据）
+        assert!(refresh_failure_is_fatal(400));
+        assert!(refresh_failure_is_fatal(401));
+        assert!(refresh_failure_is_fatal(403));
+    }
+
+    #[test]
+    fn transient_refresh_failures_keep_session() {
+        // 5xx / 网络层错误 → 不清会话（避免瞬时故障导致伪登出）
+        assert!(!refresh_failure_is_fatal(500));
+        assert!(!refresh_failure_is_fatal(502));
+        assert!(!refresh_failure_is_fatal(503));
+        assert!(!refresh_failure_is_fatal(404));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Auth / Settings
 // ---------------------------------------------------------------------------
@@ -185,6 +214,7 @@ fn ensure_valid_token(state: &State<AppState>) -> Result<(), String> {
 struct AuthStatus {
     has_session: bool, // 是否存在可恢复会话（有 refresh_token 且有 server_url）
     server_url: String,
+    device_id: String,
     device_name: String,
 }
 
@@ -198,10 +228,12 @@ fn auth_status(state: State<AppState>) -> Result<AuthStatus, String> {
         .map(|ts| ts.load_refresh().unwrap_or(None).is_some())
         .unwrap_or(false);
     let server_url = state.server_url.lock().expect("url lock").clone();
+    let device_id = state.device_id.lock().expect("dev id lock").clone();
     let device_name = state.device_name.lock().expect("dev lock").clone();
     Ok(AuthStatus {
         has_session: has_refresh && !server_url.is_empty(),
         server_url,
+        device_id,
         device_name,
     })
 }

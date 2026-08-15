@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useNotesStore } from './store/notes'
-import { authRefresh, authStatus, ipc } from './api/ipc'
+import { authRefresh, authStatus } from './api/ipc'
 import LoginView from './components/LoginView.vue'
 import TreeView from './components/TreeView.vue'
 import NoteList from './components/NoteList.vue'
@@ -99,7 +99,7 @@ async function onLoggedIn(): Promise<void> {
     await store.loadSettings()
     await store.loadTree()
     await store.loadNotes()
-    await ipc.invoke('sync.trigger').catch(() => undefined)
+    await store.triggerSync().catch(() => undefined)
   } finally {
     loading.value = false
   }

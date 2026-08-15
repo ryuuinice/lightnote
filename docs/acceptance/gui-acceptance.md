@@ -26,11 +26,12 @@
 
 1. **真实 IPC 开关**：`client/src/api/ipc.ts` 中 `USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false'`。**必须设置 `VITE_USE_MOCK=false`**，否则前端走 Mock，不会调用 Tauri 命令。
 2. **同步为手动触发**：`client/app/src/main.rs` 无后台自动同步线程（`auto_sync`/`sync_interval_sec` 仅存于内存设置，未驱动定时器）。所有 push/pull 均由用户点击 **「立即同步」**（SyncStatusBar 弹层或命令面板）触发；登录后 `App.vue::onLoggedIn` 会自动触发一次 `sync.trigger`。
-3. **双实例数据隔离**：`main.rs::setup` 用 `app.path().app_data_dir()` 固定为 `%APPDATA%\com.lightnote.app\`（identifier 见 `client/app/tauri.conf.json`）。同 Windows 用户下开两个进程 **默认共享同一份 `lightnote.db`** → 不能作为两个独立设备。三种隔离方案任选：
-   - **单账户 APPDATA 重定向（推荐，无需改代码）**：第二个实例启动时把进程 `%APPDATA%` 指到别处，`app_data_dir()` 随之落到独立目录。见 §4.1。
-   - **单机双账户**：两个 Windows 用户账户分别登录运行客户端（各账户 `%APPDATA%` 天然独立）。
-   - **两台物理机**：天然隔离，最强验证。
-   - 未启用 `tauri-plugin-single-instance`（`client/app/Cargo.toml` 无此依赖），故多窗口可启动；数据目录隔离仍是关键。
+3. **双实例数据隔离**：`main.rs::setup` 支持环境变量 **`LIGHTNOTE_DATA_DIR`** 覆盖数据目录（v1.1 RC 修复）。同 Windows 用户下开两个进程默认共享同一份 `lightnote.db` → 不能作为两个独立设备。三种隔离方案任选：
+    - **`LIGHTNOTE_DATA_DIR` 重定向（推荐，无需改代码）**：第二个实例启动前在同一 shell 设 `LIGHTNOTE_DATA_DIR=C:\ln-b` 再启动 exe，数据目录随之独立。
+      > ⚠ **历史教训（2026-08-15 验收实证）**：早期文档推荐重定向 `%APPDATA%` 是**无效**的——Windows 上 Tauri 的 `app_data_dir()` 经 `SHGetKnownFolderPath` 解析，**不读 `%APPDATA%` 环境变量**，导致双实例共库、GUI-002 首轮假阳性。必须使用 `LIGHTNOTE_DATA_DIR`。
+    - **单机双账户**：两个 Windows 用户账户分别登录运行客户端（各账户数据目录天然独立）。
+    - **两台物理机**：天然隔离，最强验证。
+    - 未启用 `tauri-plugin-single-instance`（`client/app/Cargo.toml` 无此依赖），故多窗口可启动；数据目录隔离仍是关键。
 
 ### 1.2 Windows 工具链（一次性安装）
 
@@ -315,23 +316,25 @@ cargo tauri build
 
 | 方案 | 做法 | 数据隔离 |
 |---|---|---|
-| **单账户 APPDATA 重定向（推荐）** | 实例 A 正常起；实例 B 在 PowerShell 里 `$env:APPDATA="C:\ln-b"` 后再起同一个 exe | 各自 `%APPDATA%\com.lightnote.app\` 独立 ✅（无需改代码） |
-| 单机双账户 | Windows 账户 U1 运行 PC-A、账户 U2 运行 PC-B，均 `VITE_USE_MOCK=false` | 各账户 `%APPDATA%` 天然独立 ✅ |
+| **`LIGHTNOTE_DATA_DIR` 重定向（推荐）** | 实例 A 正常起；实例 B 在 PowerShell 里 `$env:LIGHTNOTE_DATA_DIR="C:\ln-b"` 后再起同一个 exe | 各自数据目录独立 ✅（`%APPDATA%` 重定向**无效**，见 §1.1） |
+| 单机双账户 | Windows 账户 U1 运行 PC-A、账户 U2 运行 PC-B，均 `VITE_USE_MOCK=false` | 各账户数据目录天然独立 ✅ |
 | 双机 | 两台 Windows 真机，分别运行一个客户端 | 天然隔离 ✅（最强） |
-| 单机单账户双窗口（不重定向） | 同账户同 `%APPDATA%` 起两个进程 | ❌ 共享同一 `lightnote.db`，**不能**作为双设备 |
+| 单机单账户双窗口（不重定向） | 同账户起两个进程 | ❌ 共享同一 `lightnote.db`，**不能**作为双设备 |
 
 单账户双实例推荐流程（一次 `cargo tauri build`，跑两个独立 exe）：
 ```powershell
 # 实例 A（默认数据目录）
 .\client\app\target\release\LightNote.exe
-#   登录：server=http://localhost:8080  admin/admin123  设备名=PC-A
+#   登录：server=http://localhost:8080  admin/<密码>  设备名=PC-A
 
-# 实例 B（另开 PowerShell，重定向 APPDATA → 独立 DB + 独立 refresh_token）
-$env:APPDATA = "C:\ln-b"
+# 实例 B（另开 PowerShell，重定向数据目录 → 独立 DB + 独立 refresh_token）
+$env:LIGHTNOTE_DATA_DIR = "C:\ln-b"
 .\client\app\target\release\LightNote.exe
 #   登录：同 server，设备名=PC-B
 ```
-> 原理：`main.rs::setup` 的 `app.path().app_data_dir()` 在 Windows 解析为 `%APPDATA%\com.lightnote.app`；进程级覆盖 `%APPDATA%` → 数据目录随之落到独立路径。LightNote 仅用该目录存自身数据，覆盖 `%APPDATA%` 安全。`dev` 模式不推荐双开（vite 抢占 5173 端口），双实例统一用 `build` 产物。
+> 原理：`main.rs::setup` 优先读取 `LIGHTNOTE_DATA_DIR` 环境变量作为数据目录。双实例统一用 `build` 产物（`dev` 模式 vite 抢占 5173 端口）。
+>
+> ⚠ **AUTH-05 设备名注意（2026-08-15 验收教训）**：双实例窗口外观完全一致且 UI 曾无法识别当前设备（GUI-009，已修复：设备列表标注「本机」）。执行吊销用例前务必通过设置页的「（本机）」标记确认身份；**两个实例不可使用相同设备名**（服务端按 device_name 复用/新建设备记录，同名会互相顶替，造成吊销对象错误）。
 
 ### 4.2 服务端配置（两客户端共享）
 
@@ -414,7 +417,7 @@ Phase 9.2a 接线的客户端 refresh-token / 重启恢复专项。6 条全过�
 
 ### AUTH-03 Access Token 过期 → 自动续期
 
-- **前置**：AUTH-01 通过。**为快速验证，把服务端 `LIGHTNOTE_TOKEN_TTL_HOURS` 调小**（如 `1`；若服务端支持小数则 `0.01`≈36s），重启服务端。
+- **前置**：AUTH-01 通过。**为快速验证，把服务端 `LIGHTNOTE_TOKEN_TTL_HOURS` 调小**（支持小数小时，如 `0.003`≈10s），重启服务端并重新登录。
 - **操作**：登录后等到 access_token 过期 → 触发任意需 server 的命令（点「立即同步」、或打开设备列表）。
 - **预期（PASS）**：`ensure_valid_token` 检测到过期 → 自动 `auth_refresh` → 命令成功；用户无感（不回登录页）。
 - **失败（FAIL）**：命令报 401/超时；或被踢回登录页（说明过期未自动续）。
@@ -444,6 +447,21 @@ Phase 9.2a 接线的客户端 refresh-token / 重启恢复专项。6 条全过�
 - **操作**：设置页点「退出登录」→ 确认 → 关闭 App → 重启。
 - **预期（PASS）**：退出后 `%APPDATA%\com.lightnote.app\` 下 `credential` 与 `session.json` 均被删；重启后 `auth_status` has_session=false → 回登录页（不能自动登录）。
 - **失败（FAIL）**：退出后 refresh_token 残留（仍可自动登录 = 退出未清干净）。
+
+### AUTH-07 Logout Credential Erasure（2026-08-15 新增，安全回归）
+
+- **前置**：已登录（credential 文件存在）。
+- **操作**：退出登录 → 检查数据目录 → 重启。
+- **预期（PASS）**：credential 文件**物理删除**（非仅逻辑失效）；重启后不能自动恢复。
+- **自动化锚点**：`client/app/src/auth.rs::file_credential_store_round_trip` 断言文件删除。
+
+### AUTH-08 Revoke Credential Erasure（2026-08-15 新增，安全回归）
+
+- **前置**：设备 A、B 均登录（先经设置页「（本机）」标记确认身份，勿用相同设备名）。
+- **操作**：在 A 上吊销 B → 重启 B。
+- **预期（PASS）**：B 的 refresh 返回 403 DEVICE_REVOKED → `clear_session` 清空 access+refresh+session.json（含磁盘凭据文件）→ 回登录页。
+- **失败（FAIL）**：被踢回登录页但 credential 残留磁盘（= 2026-08-15 发现的 ureq Status 错误处理缺陷回归）。
+- **自动化锚点**：`client/app/src/main.rs::tests::fatal_refresh_failures_clear_session` / `transient_refresh_failures_keep_session`。
 
 ---
 

@@ -57,12 +57,13 @@ export async function authLogin(serverUrl: string, username: string, password: s
 export interface AuthStatus {
   has_session: boolean
   server_url: string
+  device_id: string
   device_name: string
 }
 
 // 启动恢复：查询是否存在可恢复会话（持久化的 refresh_token + server_url）
 export async function authStatus(): Promise<AuthStatus> {
-  if (USE_MOCK) return { has_session: false, server_url: '', device_name: '' }
+  if (USE_MOCK) return { has_session: false, server_url: '', device_id: '', device_name: '' }
   const { invoke } = await import('@tauri-apps/api/core')
   return invoke<AuthStatus>('auth_status')
 }

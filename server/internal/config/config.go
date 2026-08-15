@@ -104,11 +104,11 @@ func Load() (*Config, error) {
 		c.PasswordSet = true
 	}
 	if v := os.Getenv("LIGHTNOTE_TOKEN_TTL_HOURS"); v != "" {
-		h, err := strconv.Atoi(v)
+		h, err := strconv.ParseFloat(v, 64)
 		if err != nil || h <= 0 {
 			return nil, fmt.Errorf("invalid LIGHTNOTE_TOKEN_TTL_HOURS %q", v)
 		}
-		c.TokenTTL = time.Duration(h) * time.Hour
+		c.TokenTTL = time.Duration(h * float64(time.Hour))
 	}
 	return c, nil
 }

@@ -152,6 +152,8 @@ mod tests {
         assert_eq!(s.load_refresh().unwrap().as_deref(), Some("rt-secret"));
         s.clear_refresh().unwrap();
         assert_eq!(s.load_refresh().unwrap(), None);
+        // AUTH-07/08：凭据必须从磁盘物理删除，而非仅逻辑失效
+        assert!(!d.path().join("credential").exists());
         // 幂等 clear
         s.clear_refresh().unwrap();
     }

@@ -214,9 +214,35 @@ export const useNotesStore = defineStore('notes', {
       try {
         await ipc.invoke('sync.trigger')
         this.sync.state = 'idle'
+        // GUI-003a：同步可能拉入远端变更，立即刷新 UI（树/列表/当前笔记），
+        // 无需用户切换笔记即可看到远端内容
+        await this.refreshAfterSync()
       } catch (error) {
         this.sync.state = 'error'
         throw error
+      }
+    },
+
+    /// 同步成功后重载 UI 状态。当前笔记若有未保存本地编辑（dirty）则跳过正文重载，
+    /// 避免覆盖用户正在输入的内容。
+    async refreshAfterSync(): Promise<void> {
+      const selectedParent = this.selectedTreeParent
+      await this.loadTree()
+      await this.loadNotes(selectedParent === 'root' ? undefined : selectedParent)
+      if (this.activePanel === 'trash') await this.loadTrash()
+      const noteId = this.currentNote?.noteId
+      if (noteId && !this.dirty) {
+        try {
+          const { content } = await ipc.invoke('notes.getContent', { noteId })
+          const note = await ipc.invoke('notes.get', { noteId })
+          if (this.currentNote?.noteId === noteId && !this.dirty) {
+            this.currentNote = note
+            this.currentContent = content ?? ''
+            await this.loadAttachments(noteId)
+          }
+        } catch {
+          // 笔记可能被远端删除：忽略，下一次列表刷新会移除
+        }
       }
     },
 

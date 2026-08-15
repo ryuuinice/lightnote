@@ -135,3 +135,20 @@ is therefore **not** a Phase 8 blocker. Query-side optimization deferred.
 
 - Phase 8：性能（Lazy Tree/Note/Blob、FTS、10k/100k Notes）
 - Phase 9：Windows 打包 / 服务端部署（systemd + Caddy）/ Backup & Restore / 最终验收
+
+## v1.1-rc1 — 2026-08-15
+
+**冻结基线**：`51a80b8`（tag `v1.1-rc1`）。进入 RC 观察期：只修 P0 发布阻塞（安全/数据一致性/崩溃），功能开发转 v1.2 backlog。
+
+### 本轮交付（自 v1.1-phase9.2a-auth 起，12 提交）
+
+- **全量代码评审修复**：6 P0 + 8 P1（XSS+DOMPurify+CSP、blob 原子写、路径穿越、FTS 内容搜索、map 竞争、默认凭据、幽灵墓碑、refresh 并发竞争等），核心库测试 28→34
+- **Windows 真机验收 14/14**（GUI-001~008 + AUTH-01~08）：双设备同步/冲突/离线/重启/吊销/登出全过
+- **真机发现并修复 4 缺陷**：双实例数据隔离（LIGHTNOTE_DATA_DIR，SHGetKnownFolderPath 教训）、设备管理 API 缺失、字段大小写契约、ureq Status 凭据残留（安全）
+- **RC 收口**：GUI-003a 同步后自动刷新、GUI-009 本机设备识别、AUTH-03 小数 TTL 正式验证、AUTH-07/08 凭据清除回归锚点
+- **发布工程**：CI（4 job）、版本统一 1.1.0、MSI/NSIS 产物（安装/卸载/数据保留验证）、runbook 回填、两份审计报告
+- **性能基线**（Phase 8/9.2 沿用）：100K 首同步 9.5s，RSS 平稳 31/12MB
+
+### 已知非阻塞（v1.2 backlog）
+
+CONFLICT 后对账机制、PERF-001 批量 push、服务端错误日志、refresh token 清理、blob 会话 TTL、设置持久化、auto_sync 死开关、NSIS 可执行名 lightnote_app.exe 与产品名不一致。

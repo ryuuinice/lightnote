@@ -270,6 +270,8 @@ func shardPath(hex string) string {
 }
 
 func (s *Store) drop(sess *Session) {
+	s.mu.Lock()
 	delete(s.sessions, sess.BlobID)
+	s.mu.Unlock()
 	_ = os.RemoveAll(sess.dir)
 }

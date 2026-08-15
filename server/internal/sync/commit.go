@@ -95,6 +95,10 @@ func (c *Committer) Commit(ctx context.Context, deviceID string, ch *Change) (*R
 		return nil, fmt.Errorf("load entity: %w", err)
 	}
 
+	if !exists && ch.Operation != "CREATE" {
+		return &Result{ChangeID: ch.ChangeID, Status: StatusInvalid}, nil
+	}
+
 	if exists && ch.EntityType != "blob" && ch.BaseVersion != current {
 		if ch.EntityType == "note" {
 			seq, err := c.conflictCopy(ctx, tx, deviceID, ch, snap.(*noteSnapshot))

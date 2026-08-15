@@ -76,6 +76,11 @@ fn apply_note(conn: &Connection, pc: &PullChange) -> Result<()> {
     let title = p.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let note_type = p.get("note_type").and_then(|v| v.as_str()).unwrap_or("text").to_string();
     let blob_id = p.get("blob_id").and_then(|v| v.as_str()).map(str::to_string);
+    if let Some(bid) = blob_id.as_deref() {
+        if !bid.is_empty() && !crate::util::valid_blob_id(bid) {
+            return Err(Error::Sync(format!("invalid blob_id in pull payload: {bid}")));
+        }
+    }
     let conflict_of = p.get("conflict_of_note_id").and_then(|v| v.as_str()).map(str::to_string);
     let is_deleted = pc.operation == "DELETE" || p.get("is_deleted").and_then(|v| v.as_bool()).unwrap_or(false);
     let now = now_ms();
@@ -180,11 +185,21 @@ fn apply_attribute(conn: &Connection, pc: &PullChange) -> Result<()> {
 }
 
 fn apply_blob(conn: &Connection, pc: &PullChange) -> Result<()> {
+    if !crate::util::valid_blob_id(&pc.entity_id) {
+        return Err(Error::Sync(format!("invalid blob entity_id in pull change: {}", pc.entity_id)));
+    }
+    let now = now_ms();
+    if pc.operation == "DELETE" {
+        conn.execute(
+            "DELETE FROM blobs WHERE blob_id = ?1",
+            rusqlite::params![pc.entity_id],
+        )?;
+        return Ok(());
+    }
     let p = &pc.payload;
     let size = p.get("size").and_then(|v| v.as_i64()).unwrap_or(0);
     let mime_type = p.get("mime_type").and_then(|v| v.as_str()).map(str::to_string);
     let storage_type = p.get("storage_type").and_then(|v| v.as_str()).unwrap_or("file").to_string();
-    let now = now_ms();
     conn.execute(
         "INSERT INTO blobs (blob_id, size, mime_type, storage_type, storage_path, created_at)
          VALUES (?1,?2,?3,?4,?5,?6)

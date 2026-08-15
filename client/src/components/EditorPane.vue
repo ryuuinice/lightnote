@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { useNotesStore } from '../store/notes'
 import type { NoteMeta } from '../types'
 
@@ -11,7 +12,9 @@ const findText = ref('')
 const findMsg = ref('')
 const dragOver = ref(false)
 
-const previewHtml = computed(() => marked.parse(store.currentContent || '') as string)
+// 笔记内容是同步面（可能来自其他设备/服务端）：marked 不做消毒，必须经 DOMPurify
+// 再进 v-html，否则构成存储型 XSS（Tauri 下 XSS ≈ 可调用任意 IPC 命令）
+const previewHtml = computed(() => DOMPurify.sanitize(marked.parse(store.currentContent || '') as string))
 
 const title = ref('')
 
@@ -54,9 +57,11 @@ function onFilePicked(e: Event): void {
 }
 
 function readAndAttach(file: File): void {
-  if (!store.currentNote) return
+  const noteId = store.currentNote?.noteId
+  if (!noteId) return
+  // 捕获当前 noteId：await 期间用户可能已切换笔记，避免附件挂错笔记
   file.arrayBuffer().then((buf) => {
-    store.attachFile(store.currentNote!.noteId, file.name, file.type || 'application/octet-stream', buf)
+    store.attachFile(noteId, file.name, file.type || 'application/octet-stream', buf)
   })
 }
 

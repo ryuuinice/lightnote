@@ -11,13 +11,14 @@ import (
 )
 
 type Config struct {
-	Addr      string
-	DBPath    string
-	BlobDir   string
-	JWTSecret string
-	TokenTTL  time.Duration
-	Username  string
-	Password  string
+	Addr        string
+	DBPath      string
+	BlobDir     string
+	JWTSecret   string
+	TokenTTL    time.Duration
+	Username    string
+	Password    string
+	PasswordSet bool // 密码是否经 config 文件或环境变量显式设置
 }
 
 type fileConfig struct {
@@ -71,6 +72,7 @@ func Load() (*Config, error) {
 		}
 		if fc.User.Password != "" {
 			c.Password = fc.User.Password
+			c.PasswordSet = true
 		}
 	} else if path != "config.yaml" {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
@@ -99,6 +101,7 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("LIGHTNOTE_PASSWORD"); v != "" {
 		c.Password = v
+		c.PasswordSet = true
 	}
 	if v := os.Getenv("LIGHTNOTE_TOKEN_TTL_HOURS"); v != "" {
 		h, err := strconv.Atoi(v)

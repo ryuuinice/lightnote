@@ -28,6 +28,14 @@ pub fn blob_id_of(content: &[u8]) -> String {
     format!("sha256:{}", sha256_hex(content))
 }
 
+/// 校验 blob_id 格式（防止服务端恶意值被拼入本地文件路径造成路径穿越）
+pub fn valid_blob_id(blob_id: &str) -> bool {
+    match blob_id.strip_prefix("sha256:") {
+        Some(hex) => hex.len() == 64 && hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+        None => false,
+    }
+}
+
 /// 实体快照的 content_hash：'sha256:' || hex(SHA-256(规范化 JSON 文本))
 pub fn snapshot_hash(payload: &serde_json::Value) -> String {
     format!("sha256:{}", sha256_hex(payload.to_string().as_bytes()))

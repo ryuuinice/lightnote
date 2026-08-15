@@ -28,6 +28,7 @@ struct AppState {
     settings: Mutex<AppSettings>,
     data_dir: Mutex<PathBuf>,    // app_data_dir；session.json / credential 落此
     token_store: Mutex<Option<Box<dyn TokenStore>>>, // 启动时在 setup 注入
+    refresh_lock: Mutex<()>,     // 串行化并发 refresh（并发轮换会消费同一 token 导致伪登出）
 }
 
 #[derive(Serialize, Clone)]
@@ -110,8 +111,20 @@ fn clear_session(state: &State<AppState>) {
 }
 
 /// 用持久化的 refresh_token 换新 access_token（轮换：同时存新 refresh_token）。
-/// 401/403（无效/吊销）→ 清会话；网络错误 → 不清（瞬时）。
+/// 持锁串行化：并发触发时后者等到前者完成后复查 token 有效性，直接复用，
+/// 避免两个并发 refresh 消费同一 refresh_token（第二次 401 → 误清有效会话）。
+/// 400/401/403（无效/吊销）→ 清会话；网络错误/5xx → 不清（瞬时）。
 fn do_refresh(state: &State<AppState>) -> Result<(), String> {
+    let _serial = state.refresh_lock.lock().expect("refresh lock poisoned");
+    // double-check：等锁期间可能已有并发调用完成刷新
+    {
+        let now = now_ms();
+        let expiry = *state.token_expiry.lock().expect("expiry lock");
+        let has_token = !state.token.lock().expect("token lock").is_empty();
+        if has_token && expiry > now {
+            return Ok(());
+        }
+    }
     let refresh_token = {
         let ts = state.token_store.lock().expect("ts lock");
         let ts = ts.as_ref().ok_or_else(|| "token store not ready".to_string())?;
@@ -141,9 +154,13 @@ fn do_refresh(state: &State<AppState>) -> Result<(), String> {
             Ok(())
         }
         Ok(r) => {
-            // 401 INVALID_REFRESH_TOKEN / 403 DEVICE_REVOKED / 400：会话不可恢复
-            clear_session(state);
-            Err(format!("refresh failed: {}", r.status()))
+            let code = r.status();
+            // 400 INVALID_REFRESH_TOKEN / 401 / 403 DEVICE_REVOKED：会话不可恢复
+            if code == 400 || code == 401 || code == 403 {
+                clear_session(state);
+            }
+            // 5xx 等其他状态视为瞬时错误：不清会话
+            Err(format!("refresh failed: {code}"))
         }
         Err(e) => Err(e.to_string()), // 网络瞬时错误：不清会话
     }
@@ -374,6 +391,16 @@ fn conflicts_list(state: State<AppState>) -> Result<Vec<ConflictInfo>, String> {
 }
 
 #[tauri::command]
+fn conflicts_resolve(state: State<AppState>, conflict_note_id: String, action: String) -> Result<(), String> {
+    let keep = match action.as_str() {
+        "keep_conflict" => true,
+        "discard_conflict" => false,
+        other => return Err(format!("invalid action: {other}")),
+    };
+    with_core(&state, |c| c.conflicts_resolve(&conflict_note_id, keep)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn trash_empty(state: State<AppState>) -> Result<i64, String> {
     with_core(&state, |c| c.trash_empty()).map_err(|e| e.to_string())
 }
@@ -467,6 +494,7 @@ fn main() {
         settings: Mutex::new(AppSettings::default()),
         data_dir: Mutex::new(std::env::temp_dir().join("lightnote-data")),
         token_store: Mutex::new(None),
+        refresh_lock: Mutex::new(()),
     };
 
     tauri::Builder::default()
@@ -500,6 +528,7 @@ fn main() {
             tags_remove,
             trash_list,
             conflicts_list,
+            conflicts_resolve,
             sync_status,
             sync_trigger,
         ])

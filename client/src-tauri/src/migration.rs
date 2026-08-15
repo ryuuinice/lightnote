@@ -52,6 +52,8 @@ fn migration_sql(version: i64) -> String {
     }
 }
 
+const LATEST_VERSION: i64 = 4;
+
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -64,8 +66,13 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         [],
         |r| r.get(0),
     )?;
+    if current > LATEST_VERSION {
+        return Err(crate::error::Error::Sync(format!(
+            "database schema version {current} is newer than this build supports ({LATEST_VERSION}); upgrade the app"
+        )));
+    }
     let mut applied_v4 = false;
-    for version in (current + 1)..=4 {
+    for version in (current + 1)..=LATEST_VERSION {
         let tx = conn.transaction()?;
         tx.execute_batch(&migration_sql(version))?;
         tx.execute(

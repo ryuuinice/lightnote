@@ -19,6 +19,10 @@ const needsLogin = ref(false)
 const loading = ref(true)
 
 onMounted(async () => {
+  // 全局快捷键 / 设置事件必须在任何 early-return（登录页）之前注册，
+  // 否则交互式登录后 onLoggedIn 不会补注册，快捷键全部失效
+  window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('open-settings', onOpenSettings)
   try {
     await store.loadSettings()
     // 启动恢复：若存在持久化会话，用 refresh_token 换新 access_token 后直接进主界面
@@ -39,8 +43,6 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
-  window.addEventListener('keydown', onGlobalKeydown)
-  window.addEventListener('open-settings', onOpenSettings)
 })
 
 onUnmounted(() => {

@@ -1177,3 +1177,140 @@ fn ureq_blob_transport_against_local_http_server() {
     assert_eq!(got, content);
     handle.join().unwrap();
 }
+
+// ─── 回归测试（评审修复） ────────────────────────────────────────────
+
+/// P0-3：pull payload 中的恶意 blob_id（路径穿越）必须被拒绝
+#[test]
+fn apply_rejects_traversal_blob_id() {
+    let conn = memory_conn();
+    let mut pc = note_pull_change(1, &uuid_v7(), "note-evil", 1, "evil", "CREATE");
+    pc.payload["blob_id"] = json!("../../etc/passwd");
+    let err = apply::apply(&conn, &pc);
+    assert!(err.is_err(), "note payload with traversal blob_id must be rejected");
+
+    let mut pc2 = note_pull_change(2, &uuid_v7(), "note-evil2", 1, "evil2", "CREATE");
+    pc2.entity_type = "blob".to_string();
+    pc2.entity_id = "sha256:..%2f..%2fetc%2fpasswd".to_string();
+    pc2.payload = json!({"size": 10});
+    assert!(apply::apply(&conn, &pc2).is_err(), "blob entity with invalid id must be rejected");
+}
+
+/// P0-3：blobs_get / blobs_exists 拒绝非法 blob_id
+#[test]
+fn commands_reject_invalid_blob_id_lookup() {
+    let core = core();
+    assert!(matches!(
+        core.blobs_get("../../etc/passwd"),
+        Err(Error::BlobMissing(_))
+    ));
+    assert!(!core.blobs_exists("not-a-blob-id").unwrap());
+}
+
+/// P0-4：pull 的 blob 下载完成后回填 storage_path，FTS 内容搜索生效
+#[test]
+fn pull_blob_download_backfills_fts_content_search() {
+    let conn = memory_conn();
+    let content = "独一无二的可搜索正文内容 unique-searchable-body";
+    let blob_id = crate::util::blob_id_of(content.as_bytes());
+
+    // 模拟 pull：note 变更（带 blob_id）+ blob 变更
+    let mut pc = note_pull_change(1, &uuid_v7(), "note-pulled", 1, "拉取的笔记", "CREATE");
+    pc.payload["blob_id"] = json!(blob_id);
+    apply::apply(&conn, &pc).unwrap();
+    let pb = PullChange {
+        server_sequence: 2,
+        change_id: uuid_v7(),
+        origin_device_id: Some("device-b".to_string()),
+        entity_type: "blob".to_string(),
+        entity_id: blob_id.clone(),
+        operation: "CREATE".to_string(),
+        version: 1,
+        payload: json!({"size": content.len(), "mime_type": "text/markdown"}),
+    };
+    apply::apply(&conn, &pb).unwrap();
+
+    // 下载前：内容搜索搜不到（文件不在本地）
+    assert!(crate::fts::search(&conn, "searchable", 10).unwrap().is_empty());
+
+    // 下载完成 → 回填 storage_path + FTS 重建
+    let dir = blob_dir("fts-backfill");
+    let queue = DownloadQueue::new(&dir);
+    queue.manager().write_local_atomic(&blob_id, content.as_bytes()).unwrap();
+    crate::blob::download_queue::backfill_after_download(&conn, queue.manager(), &blob_id).unwrap();
+
+    let results = crate::fts::search(&conn, "searchable", 10).unwrap();
+    assert_eq!(results.len(), 1, "content search must find pulled note after download");
+    assert_eq!(results[0].note_id, "note-pulled");
+}
+
+/// P1-1：trash_empty 后不得遗留幽灵分支（子笔记指向已清除的父）
+#[test]
+fn trash_empty_removes_ghost_branches() {
+    let mut core = core();
+    let parent = core.create_note("root", "父笔记", "text").unwrap();
+    let child = core.create_note(&parent.note_id, "子笔记", "text").unwrap();
+
+    // 仅删除父笔记并清空回收站
+    core.delete_note(&parent.note_id).unwrap();
+    core.trash_empty().unwrap();
+
+    let ghost_branches: i64 = core
+        .db()
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM branches WHERE parent_note_id = ?1 OR child_note_id = ?1",
+            rusqlite::params![parent.note_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ghost_branches, 0, "no branches may reference the purged note");
+
+    // 子笔记未被删除：其分支随父清除后应出现在根列表（而非彻底不可见）
+    let root = core.list_notes(None, false).unwrap();
+    assert!(root.iter().any(|m| m.note_id == child.note_id), "orphaned child must surface at root");
+}
+
+/// P1-6：schema 版本高于当前构建时必须报错，而非静默跳过迁移
+#[test]
+fn migration_rejects_newer_schema_version() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+         INSERT INTO schema_migrations (version, applied_at) VALUES (99, 0);",
+    )
+    .unwrap();
+    assert!(migration::migrate(&mut conn).is_err(), "newer schema must be rejected");
+}
+
+/// P1-2：blob 的 DELETE pull 变更应删除行，而非用空 payload 覆盖元数据
+#[test]
+fn apply_blob_delete_removes_row() {
+    let conn = memory_conn();
+    let blob_id = crate::util::blob_id_of(b"to be deleted");
+    let pb = PullChange {
+        server_sequence: 1,
+        change_id: uuid_v7(),
+        origin_device_id: Some("device-b".to_string()),
+        entity_type: "blob".to_string(),
+        entity_id: blob_id.clone(),
+        operation: "CREATE".to_string(),
+        version: 1,
+        payload: json!({"size": 15, "mime_type": "text/markdown"}),
+    };
+    apply::apply(&conn, &pb).unwrap();
+    assert!(repo::get_blob(&conn, &blob_id).unwrap().is_some());
+
+    let pd = PullChange {
+        server_sequence: 2,
+        change_id: uuid_v7(),
+        origin_device_id: Some("device-b".to_string()),
+        entity_type: "blob".to_string(),
+        entity_id: blob_id.clone(),
+        operation: "DELETE".to_string(),
+        version: 2,
+        payload: json!({}),
+    };
+    apply::apply(&conn, &pd).unwrap();
+    assert!(repo::get_blob(&conn, &blob_id).unwrap().is_none(), "DELETE change must remove blob row");
+}

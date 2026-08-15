@@ -83,11 +83,21 @@ type LoginResult struct {
 	DeviceID     string
 }
 
+// dummyHash 用于用户名不存在时消耗等量 bcrypt 时间，防止时序枚举。
+var dummyHash = func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("lightnote-timing-dummy"), bcrypt.DefaultCost)
+	if err != nil {
+		panic("auth: generate dummy hash: " + err.Error())
+	}
+	return h
+}()
+
 func (a *Auth) Login(ctx context.Context, username, password, deviceName, deviceType string) (*LoginResult, error) {
 	var userID, hash string
 	err := a.store.Read().QueryRowContext(ctx,
 		"SELECT user_id, password_hash FROM users WHERE username = ?", username).Scan(&userID, &hash)
 	if err == sql.ErrNoRows {
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(password))
 		return nil, ErrInvalidCredentials
 	}
 	if err != nil {

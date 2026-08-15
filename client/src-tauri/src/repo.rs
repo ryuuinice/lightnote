@@ -42,6 +42,10 @@ pub fn get_note_required(conn: &Connection, note_id: &str) -> Result<Note> {
 pub fn delete_note_row(conn: &Connection, note_id: &str) -> Result<()> {
     conn.execute("DELETE FROM notes WHERE note_id = ?1", rusqlite::params![note_id])?;
     conn.execute("DELETE FROM branches WHERE child_note_id = ?1", rusqlite::params![note_id])?;
+    // 该笔记作为父节点的分支一并删除：否则子笔记挂在已不存在的父上，
+    // 在 list_notes(ghost_parent) 与根列表（存在活跃分支而被排除）两侧都不可见
+    conn.execute("DELETE FROM branches WHERE parent_note_id = ?1", rusqlite::params![note_id])?;
+    conn.execute("DELETE FROM attributes WHERE note_id = ?1", rusqlite::params![note_id])?;
     Ok(())
 }
 

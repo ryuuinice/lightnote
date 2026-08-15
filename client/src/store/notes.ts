@@ -9,6 +9,7 @@ export const useNotesStore = defineStore('notes', {
     currentNote: null as Note | null,
     currentContent: '',
     dirty: false,
+    switching: false, // openNote 异步切换期间为 true：忽略编辑输入，防止被旧内容覆盖
     saveTimer: null as ReturnType<typeof setTimeout> | null,
     searchResults: [] as { noteId: string; title: string; snippet: string; matchedTags: string[] }[],
     trash: [] as NoteMeta[],
@@ -70,18 +71,24 @@ export const useNotesStore = defineStore('notes', {
 
     async openNote(noteId: string): Promise<void> {
       if (this.currentNote?.noteId === noteId) return
-      if (this.saveTimer) {
-        clearTimeout(this.saveTimer)
-        this.saveTimer = null
+      if (this.switching) return
+      this.switching = true
+      try {
+        if (this.saveTimer) {
+          clearTimeout(this.saveTimer)
+          this.saveTimer = null
+        }
+        if (this.currentNote && this.dirty && !(await this.saveContent())) return
+        this.selectedNoteId = noteId
+        this.currentNote = await ipc.invoke('notes.get', { noteId })
+        const { content } = await ipc.invoke('notes.getContent', { noteId })
+        this.currentContent = content ?? ''
+        this.dirty = false
+        this.mobilePane = 'editor'
+        await this.loadAttachments(noteId)
+      } finally {
+        this.switching = false
       }
-      if (this.currentNote && this.dirty && !(await this.saveContent())) return
-      this.selectedNoteId = noteId
-      this.currentNote = await ipc.invoke('notes.get', { noteId })
-      const { content } = await ipc.invoke('notes.getContent', { noteId })
-      this.currentContent = content ?? ''
-      this.dirty = false
-      this.mobilePane = 'editor'
-      await this.loadAttachments(noteId)
     },
 
     async createNote(parentNoteId: string, title: string): Promise<void> {
@@ -117,6 +124,7 @@ export const useNotesStore = defineStore('notes', {
     },
 
     updateContent(content: string): void {
+      if (this.switching) return // 切换加载中：旧笔记的迟到输入不覆盖待加载内容
       this.currentContent = content
       this.dirty = true
       if (this.saveTimer) clearTimeout(this.saveTimer)

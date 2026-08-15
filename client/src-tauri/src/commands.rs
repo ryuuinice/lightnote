@@ -210,10 +210,7 @@ impl Core {
         let now = now_ms();
         let content_bytes = content.as_bytes();
         let blob_id = blob_id_of(content_bytes);
-        let path = self.db.blob_path(&blob_id);
-        if !path.exists() {
-            std::fs::write(&path, content_bytes)?;
-        }
+        self.blob_manager.write_local_atomic(&blob_id, content_bytes)?;
         let note = repo::get_note_required(self.db.connection(), note_id)?;
         let tx = self.db.tx()?;
         let is_new = !repo::blob_exists(&tx, &blob_id)?;
@@ -222,7 +219,7 @@ impl Core {
             size: content_bytes.len() as i64,
             mime_type: Some("text/markdown".to_string()),
             storage_type: "file".to_string(),
-            storage_path: path.to_string_lossy().into_owned(),
+            storage_path: self.blob_manager.local_path(&blob_id).to_string_lossy().into_owned(),
             created_at: now,
         };
         repo::upsert_blob(&tx, &blob)?;
@@ -489,11 +486,17 @@ impl Core {
     }
 
     pub fn blobs_get(&self, blob_id: &str) -> Result<Vec<u8>> {
+        if !crate::util::valid_blob_id(blob_id) {
+            return Err(Error::BlobMissing(blob_id.to_string()));
+        }
         let path = self.db.blob_path(blob_id);
         std::fs::read(&path).map_err(|_| Error::BlobMissing(blob_id.to_string()))
     }
 
     pub fn blobs_exists(&self, blob_id: &str) -> Result<bool> {
+        if !crate::util::valid_blob_id(blob_id) {
+            return Ok(false);
+        }
         Ok(self.db.blob_path(blob_id).exists())
     }
 
@@ -506,7 +509,12 @@ impl Core {
     }
 
     pub fn blob_download(&self, transport: &dyn BlobTransport, blob_id: &str) -> Result<()> {
-        self.blob_manager.download(transport, blob_id)
+        self.blob_manager.download(transport, blob_id)?;
+        crate::blob::download_queue::backfill_after_download(
+            self.db.connection(),
+            &self.blob_manager,
+            blob_id,
+        )
     }
 
     pub fn blob_queue_enqueue_missing(&self) -> Result<usize> {
@@ -542,6 +550,26 @@ impl Core {
 
     pub fn conflicts_list(&self) -> Result<Vec<ConflictInfo>> {
         repo::list_conflicts(self.db.connection())
+    }
+
+    /// 冲突副本解决：
+    /// - keep_conflict：副本标题/正文覆盖原笔记（产生 Update Change 同步），副本转入回收站
+    /// - discard_conflict：副本直接转入回收站（Tombstone + DELETE Change）
+    pub fn conflicts_resolve(&mut self, conflict_note_id: &str, keep_conflict: bool) -> Result<()> {
+        let note = repo::get_note_required(self.db.connection(), conflict_note_id)?;
+        let Some(orig_id) = note.conflict_of_note_id.clone() else {
+            return Err(Error::InvalidArgument(format!(
+                "note {conflict_note_id} is not a conflict copy"
+            )));
+        };
+        if keep_conflict {
+            let content = self.get_content(conflict_note_id)?.1.unwrap_or_default();
+            self.update_note(&orig_id, &note.title)?;
+            if note.blob_id.is_some() {
+                self.save_content(&orig_id, &content)?;
+            }
+        }
+        self.delete_note(conflict_note_id)
     }
 
     /// FTS 损坏时重建

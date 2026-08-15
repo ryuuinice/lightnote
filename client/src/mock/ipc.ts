@@ -99,10 +99,10 @@ export const mockApi = {
     n.updatedAt = Date.now()
     return noteMeta(n)
   },
-  async 'notes.delete'(params: { noteId: string }): Promise<{ ok: true }> {
+  async 'notes.delete'(params: { noteId: string }): Promise<void> {
     const n = db.notes.get(params.noteId)
     if (n) { n.isDeleted = true; n.version += 1; n.updatedAt = Date.now() }
-    return { ok: true }
+    return
   },
   async 'notes.restore'(params: { noteId: string }): Promise<NoteMeta> {
     const n = db.notes.get(params.noteId)
@@ -112,14 +112,14 @@ export const mockApi = {
     n.updatedAt = Date.now()
     return noteMeta(n)
   },
-  async 'notes.saveContent'(params: { noteId: string; content: string }): Promise<{ blobId: string }> {
+  async 'notes.saveContent'(params: { noteId: string; content: string }): Promise<string> {
     const n = db.notes.get(params.noteId)
     if (!n) throw { code: 'NOTE_NOT_FOUND', message: '笔记不存在' }
     n.content = params.content
     n.version += 1
     n.updatedAt = Date.now()
     n.blobId = `sha256:mock-${n.noteId}-${n.version}`
-    return { blobId: n.blobId }
+    return n.blobId ?? ''
   },
   async 'notes.getContent'(params: { noteId: string }): Promise<{ blobId: string; content: string | null }> {
     const n = db.notes.get(params.noteId)
@@ -147,13 +147,13 @@ export const mockApi = {
   async 'tree.children'(params: { parentNoteId: string }): Promise<TreeNode[]> {
     return clone(childrenOf(params.parentNoteId).map((c) => ({ ...c, children: undefined })))
   },
-  async 'tree.move'(params: { noteId: string; newParentNoteId: string; newSortOrder?: number }): Promise<{ ok: true }> {
+  async 'tree.move'(params: { noteId: string; newParentNoteId: string; newSortOrder?: number }): Promise<void> {
     const b = [...db.branches.values()].find((x) => x.childNoteId === params.noteId)
     if (b) {
       b.parentNoteId = params.newParentNoteId
       if (params.newSortOrder !== undefined) b.sortOrder = params.newSortOrder
     }
-    return { ok: true }
+    return
   },
   async 'search.query'(params: { query: string; limit?: number }): Promise<SearchResult[]> {
     const q = params.query.toLowerCase()
@@ -175,14 +175,14 @@ export const mockApi = {
   async 'sync.status'(): Promise<SyncStatus> {
     return { state: 'idle', lastSyncAt: Date.now(), pendingCount: 0, failedCount: 0 }
   },
-  async 'sync.trigger'(): Promise<{ started: boolean }> {
-    return { started: true }
+  async 'sync.trigger'(): Promise<string> {
+    return 'pushed=0 pulled=0 cursor=0'
   },
-  async 'blobs.get'(_params: { blobId: string }): Promise<{ data: string }> {
-    return { data: '' }
+  async 'blobs.get'(_params: { blobId: string }): Promise<number[]> {
+    return []
   },
-  async 'blobs.exists'(_params: { blobId: string }): Promise<{ exists: boolean }> {
-    return { exists: true }
+  async 'blobs.exists'(_params: { blobId: string }): Promise<boolean> {
+    return true
   },
   async 'tags.list'(params: { noteId?: string }): Promise<Tag[]> {
     const counts = new Map<string, number>()
@@ -197,9 +197,9 @@ export const mockApi = {
     db.attributes.set(attribute.attributeId, attribute)
     return clone(attribute)
   },
-  async 'tags.remove'(params: { attributeId: string }): Promise<{ ok: true }> {
+  async 'tags.remove'(params: { attributeId: string }): Promise<void> {
     db.attributes.delete(params.attributeId)
-    return { ok: true }
+    return
   },
   async 'trash.list'(): Promise<NoteMeta[]> {
     const out: NoteMeta[] = []
@@ -208,12 +208,12 @@ export const mockApi = {
     }
     return clone(out)
   },
-  async 'trash.empty'(): Promise<{ deleted: number }> {
+  async 'trash.empty'(): Promise<number> {
     let deleted = 0
     for (const n of db.notes.values()) {
       if (n.isDeleted) { db.notes.delete(n.noteId); deleted += 1 }
     }
-    return { deleted }
+    return deleted
   },
   async 'conflicts.list'(): Promise<ConflictInfo[]> {
     const out: ConflictInfo[] = []
@@ -224,7 +224,7 @@ export const mockApi = {
     }
     return clone(out)
   },
-  async 'conflicts.resolve'(params: { conflictNoteId: string; action: 'keep_conflict' | 'discard_conflict' }): Promise<{ ok: true }> {
+  async 'conflicts.resolve'(params: { conflictNoteId: string; action: 'keep_conflict' | 'discard_conflict' }): Promise<void> {
     if (params.action === 'discard_conflict') {
       db.notes.delete(params.conflictNoteId)
     } else {
@@ -236,10 +236,11 @@ export const mockApi = {
           orig.content = c.content
           orig.version += 1
         }
-        c.conflictOfNoteId = undefined
+        // 与真实后端（lightnote_core conflicts_resolve）一致：覆盖原笔记后副本删除
+        db.notes.delete(params.conflictNoteId)
       }
     }
-    return { ok: true }
+    return
   },
   async 'settings.get'(): Promise<Settings> {
     return { serverUrl: 'https://lightnote.example.com', autoSync: true, syncIntervalSec: 60 }
@@ -247,13 +248,13 @@ export const mockApi = {
   async 'settings.update'(params: Partial<Settings>): Promise<Settings> {
     return { serverUrl: params.serverUrl ?? 'https://lightnote.example.com', autoSync: params.autoSync ?? true, syncIntervalSec: params.syncIntervalSec ?? 60 }
   },
-  async 'settings.logout'(): Promise<{ ok: true }> {
-    return { ok: true }
+  async 'settings.logout'(): Promise<void> {
+    return
   },
   async 'devices.list'(): Promise<Device[]> {
     return [{ deviceId: 'device-mock-1', deviceName: 'PC-Windows', deviceType: 'desktop', createdAt: Date.now(), lastSeen: Date.now() }]
   },
-  async 'devices.revoke'(_params: { deviceId: string }): Promise<{ ok: true }> {
-    return { ok: true }
+  async 'devices.revoke'(_params: { deviceId: string }): Promise<void> {
+    return
   },
 } satisfies Record<string, (params: never) => Promise<unknown>>

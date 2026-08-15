@@ -31,6 +31,14 @@ func main() {
 		cfg.JWTSecret = secret
 		log.Printf("WARNING: LIGHTNOTE_JWT_SECRET 未配置，已生成随机密钥（重启后已签发 Token 将失效）")
 	}
+	if !cfg.PasswordSet {
+		pw, err := auth.RandomSecret()
+		if err != nil {
+			log.Fatalf("generate random password: %v", err)
+		}
+		cfg.Password = pw
+		log.Printf("WARNING: 未配置用户密码（config.yaml user.password 或 LIGHTNOTE_PASSWORD），已生成随机密码：%s", pw)
+	}
 	store, err := db.Open(cfg.DBPath)
 	if err != nil {
 		log.Fatalf("open database: %v", err)

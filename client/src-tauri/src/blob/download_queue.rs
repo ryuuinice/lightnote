@@ -50,6 +50,7 @@ impl DownloadQueue {
                     .and_then(|bytes| self.manager.write_local_atomic(&blob_id, &bytes));
                 match outcome {
                     Ok(()) => {
+                        backfill_after_download(conn, &self.manager, &blob_id)?;
                         remove(conn, &blob_id)?;
                         report.downloaded += 1;
                     }
@@ -86,6 +87,24 @@ impl DownloadQueue {
         }
         Ok(enqueued)
     }
+}
+
+/// blob 落盘后：回填 blobs.storage_path 为本地路径，并对引用该 blob 的笔记重建 FTS
+/// （pull 时 storage_path 为空串，FTS 只索引了标题/标签；下载完成后需补全正文索引）
+pub fn backfill_after_download(
+    conn: &Connection,
+    manager: &BlobManager,
+    blob_id: &str,
+) -> Result<()> {
+    let local = manager.local_path(blob_id).to_string_lossy().into_owned();
+    conn.execute(
+        "UPDATE blobs SET storage_path = ?1 WHERE blob_id = ?2",
+        rusqlite::params![local, blob_id],
+    )?;
+    for note_id in crate::repo::list_notes_by_blob(conn, blob_id)? {
+        crate::fts::sync_note(conn, &note_id)?;
+    }
+    Ok(())
 }
 
 pub fn enqueue(conn: &Connection, blob_id: &str, priority: i64, now: i64) -> Result<()> {

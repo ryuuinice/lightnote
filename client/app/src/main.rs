@@ -421,8 +421,19 @@ fn settings_logout(state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceEntry {
+    device_id: String,
+    device_name: String,
+    device_type: Option<String>,
+    last_seen: i64,
+    revoked_at: Option<i64>,
+    created_at: i64,
+}
+
 #[tauri::command]
-fn devices_list(state: State<AppState>) -> Result<Vec<serde_json::Value>, String> {
+fn devices_list(state: State<AppState>) -> Result<Vec<DeviceEntry>, String> {
     ensure_valid_token(&state)?;
     let url = state.server_url.lock().expect("url lock").clone();
     let token = state.token.lock().expect("token lock").clone();
@@ -435,7 +446,22 @@ fn devices_list(state: State<AppState>) -> Result<Vec<serde_json::Value>, String
         .call()
         .map_err(|e| e.to_string())?;
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-    Ok(v["devices"].as_array().cloned().unwrap_or_default())
+    let Some(arr) = v["devices"].as_array() else {
+        return Ok(vec![]);
+    };
+    // 服务端返回 snake_case，前端契约是 camelCase：此处统一转换
+    let mut out = Vec::with_capacity(arr.len());
+    for d in arr {
+        out.push(DeviceEntry {
+            device_id: d["device_id"].as_str().unwrap_or_default().to_string(),
+            device_name: d["device_name"].as_str().unwrap_or_default().to_string(),
+            device_type: d["device_type"].as_str().map(str::to_string),
+            last_seen: d["last_seen"].as_i64().unwrap_or(0),
+            revoked_at: d["revoked_at"].as_i64(),
+            created_at: d["created_at"].as_i64().unwrap_or(0),
+        });
+    }
+    Ok(out)
 }
 
 #[tauri::command]

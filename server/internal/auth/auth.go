@@ -165,6 +165,63 @@ func (a *Auth) upsertDevice(ctx context.Context, userID, deviceName, deviceType 
 	return deviceID, nil
 }
 
+// DeviceInfo 设备列表条目
+type DeviceInfo struct {
+	DeviceID    string  `json:"device_id"`
+	DeviceName  string  `json:"device_name"`
+	DeviceType  *string `json:"device_type"`
+	CreatedAt   int64   `json:"created_at"`
+	LastSeen    int64   `json:"last_seen"`
+	RevokedAt   *int64  `json:"revoked_at"`
+}
+
+// ListDevices 列出用户全部设备（含已吊销，供设备管理 UI 展示）
+func (a *Auth) ListDevices(ctx context.Context, userID string) ([]DeviceInfo, error) {
+	rows, err := a.store.Read().QueryContext(ctx,
+		`SELECT device_id, device_name, device_type, created_at,
+		        COALESCE(last_seen, created_at), revoked_at
+		 FROM devices WHERE user_id = ? ORDER BY created_at`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list devices: %w", err)
+	}
+	defer rows.Close()
+	var out []DeviceInfo
+	for rows.Next() {
+		var d DeviceInfo
+		if err := rows.Scan(&d.DeviceID, &d.DeviceName, &d.DeviceType, &d.CreatedAt, &d.LastSeen, &d.RevokedAt); err != nil {
+			return nil, fmt.Errorf("scan device: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// RevokeDevice 吊销设备并级联吊销其全部 refresh_token（同事务）
+func (a *Auth) RevokeDevice(ctx context.Context, userID, deviceID string) error {
+	tx, err := a.store.Write().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin revoke device: %w", err)
+	}
+	defer tx.Rollback()
+	now := time.Now().UnixMilli()
+	res, err := tx.ExecContext(ctx,
+		"UPDATE devices SET revoked_at = ? WHERE device_id = ? AND user_id = ? AND revoked_at IS NULL",
+		now, deviceID, userID)
+	if err != nil {
+		return fmt.Errorf("revoke device: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// 不存在/不属于该用户/已吊销：幂等返回成功（不泄露存在性）
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE refresh_tokens SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL",
+		now, deviceID); err != nil {
+		return fmt.Errorf("revoke device tokens: %w", err)
+	}
+	return tx.Commit()
+}
+
 func (a *Auth) IssueToken(userID, deviceID string) (string, error) {
 	now := time.Now()
 	claims := Claims{

@@ -71,3 +71,41 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		"expires_in":    res.ExpiresIn,
 	})
 }
+
+// GET /api/v1/devices — 列出当前用户全部设备
+func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
+	claims, _ := r.Context().Value(claimsKey{}).(*auth.Claims)
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "未认证")
+		return
+	}
+	devices, err := s.auth.ListDevices(r.Context(), claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "内部错误")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"devices": devices})
+}
+
+// DELETE /api/v1/devices/{device_id} — 吊销设备（级联吊销其 refresh_token）
+func (s *Server) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
+	claims, _ := r.Context().Value(claimsKey{}).(*auth.Claims)
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "未认证")
+		return
+	}
+	deviceID := r.PathValue("device_id")
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_DATA", "缺少 device_id")
+		return
+	}
+	if deviceID == claims.DeviceID {
+		writeError(w, http.StatusBadRequest, "INVALID_DATA", "不能吊销当前设备，请使用退出登录")
+		return
+	}
+	if err := s.auth.RevokeDevice(r.Context(), claims.Subject, deviceID); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "内部错误")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

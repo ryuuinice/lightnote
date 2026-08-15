@@ -40,6 +40,8 @@ func (s *Server) Handler() http.Handler {
 	protected.HandleFunc("PUT /api/v1/blobs/{blob_id}/chunks/{index}", s.handleBlobChunk)
 	protected.HandleFunc("POST /api/v1/blobs/{blob_id}/complete", s.handleBlobComplete)
 	protected.HandleFunc("GET /api/v1/blobs/{blob_id}", s.handleBlobGet)
+	protected.HandleFunc("GET /api/v1/devices", s.handleListDevices)
+	protected.HandleFunc("DELETE /api/v1/devices/{device_id}", s.handleRevokeDevice)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/healthz", s.handleHealthz)

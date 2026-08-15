@@ -533,9 +533,13 @@ fn main() {
             sync_trigger,
         ])
         .setup(|app| {
-            let dir = app.path().app_data_dir().unwrap_or_else(|_| {
-                std::env::temp_dir().join("lightnote-data")
-            });
+            // 数据目录：优先 LIGHTNOTE_DATA_DIR 环境变量（真机双实例隔离用）；
+            // 注意 Windows 下设置 %APPDATA% 无效——Tauri 走 SHGetKnownFolderPath，不读该环境变量
+            let dir = std::env::var("LIGHTNOTE_DATA_DIR")
+                .ok()
+                .map(PathBuf::from)
+                .or_else(|| app.path().app_data_dir().ok())
+                .unwrap_or_else(|| std::env::temp_dir().join("lightnote-data"));
             std::fs::create_dir_all(&dir).ok();
             let db_path = dir.join("lightnote.db");
             let blobs_path = dir.join("blobs");

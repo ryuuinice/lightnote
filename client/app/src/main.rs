@@ -139,7 +139,7 @@ fn do_refresh(state: &State<AppState>) -> Result<(), String> {
         .timeout(Duration::from_secs(10))
         .send_json(serde_json::json!({ "refresh_token": rt }));
     match resp {
-        Ok(r) if r.status() == 200 => {
+        Ok(r) => {
             let v: serde_json::Value = r.into_json().map_err(|e| e.to_string())?;
             let t = parse_refresh_response(&v)?;
             *state.token.lock().expect("token lock") = t.access_token;
@@ -153,9 +153,9 @@ fn do_refresh(state: &State<AppState>) -> Result<(), String> {
             rebuild_transports(state);
             Ok(())
         }
-        Ok(r) => {
-            let code = r.status();
-            // 400 INVALID_REFRESH_TOKEN / 401 / 403 DEVICE_REVOKED：会话不可恢复
+        Err(ureq::Error::Status(code, _)) => {
+            // 400 INVALID_REFRESH_TOKEN / 401 / 403 DEVICE_REVOKED：会话不可恢复，清本地凭据。
+            // 注意 ureq 2.x 非 2xx 返回 Err(Status(..)) 而非 Ok(response)，须在此分支处理。
             if code == 400 || code == 401 || code == 403 {
                 clear_session(state);
             }
@@ -229,11 +229,20 @@ fn auth_login(
     });
     let resp = ureq::post(&url)
         .timeout(Duration::from_secs(10))
-        .send_json(body)
-        .map_err(|e| e.to_string())?;
-    if resp.status() != 200 {
-        return Err(format!("login failed: {}", resp.status()));
-    }
+        .send_json(body);
+    let resp = match resp {
+        Ok(r) => r,
+        // ureq 2.x：非 2xx 走 Err(Status(..))；4xx 提取服务端错误消息，其余报状态码
+        Err(ureq::Error::Status(code, r)) => {
+            let msg = r
+                .into_json::<serde_json::Value>()
+                .ok()
+                .and_then(|v| v["message"].as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("login failed: {code}"));
+            return Err(msg);
+        }
+        Err(e) => return Err(e.to_string()),
+    };
     let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
     let t = parse_login_response(&v)?;
 
@@ -472,12 +481,19 @@ fn devices_revoke(state: State<AppState>, device_id: String) -> Result<(), Strin
     let resp = ureq::delete(&format!("{url}/api/v1/devices/{device_id}"))
         .set("Authorization", &format!("Bearer {token}"))
         .timeout(Duration::from_secs(10))
-        .call()
-        .map_err(|e| e.to_string())?;
-    if resp.status() != 200 {
-        return Err(format!("revoke failed: {}", resp.status()));
+        .call();
+    match resp {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(code, r)) => {
+            let msg = r
+                .into_json::<serde_json::Value>()
+                .ok()
+                .and_then(|v| v["message"].as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("revoke failed: {code}"));
+            Err(msg)
+        }
+        Err(e) => Err(e.to_string()),
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

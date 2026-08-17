@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口默认权限：事件监听（close-requested/session-cleared）+ 关窗前 flush 后 destroy",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-destroy"
+  ]
+}

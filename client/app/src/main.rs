@@ -69,7 +69,7 @@ fn uuid_v4_simple() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let mut buf = [0u8; 16];
     let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    buf[..8].copy_from_slice(&t.as_nanos().to_le_bytes());
+    buf[..8].copy_from_slice(&(t.as_nanos() as u64).to_le_bytes());
     let pid = std::process::id() as u64;
     let heap = &buf as *const _ as u64;
     buf[8..].copy_from_slice(&(pid ^ heap.rotate_left(17)).to_le_bytes());
@@ -732,7 +732,7 @@ fn main() {
             std::fs::create_dir_all(&dir).ok();
             let db_path = dir.join("lightnote.db");
             let blobs_path = dir.join("blobs");
-            let state = app.state::<AppState>();
+            let state = app.state::<Arc<AppState>>();
             // 注入凭据存储 + 记录数据目录
             *state.data_dir.lock().expect("dir lock") = dir.clone();
             *state.token_store.lock().expect("ts lock") =

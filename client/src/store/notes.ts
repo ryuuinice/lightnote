@@ -208,9 +208,16 @@ export const useNotesStore = defineStore('notes', {
     },
 
     async attachFile(parentNoteId: string, name: string, mimeType: string, data: ArrayBuffer): Promise<void> {
-      const bytes = Array.from(new Uint8Array(data))
+      // base64 分块编码（大文件一次性 String.fromCharCode 会爆调用栈）
+      const bytes = new Uint8Array(data)
+      let binary = ''
+      const chunk = 0x8000
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+      }
+      const dataBase64 = btoa(binary)
       try {
-        await ipc.invoke('notes.attach', { parentNoteId, name, mimeType, data: bytes })
+        await ipc.invoke('notes.attach', { parentNoteId, name, mimeType, dataBase64 })
         await this.loadTree()
         await this.loadNotes(parentNoteId)
         await this.loadAttachments(parentNoteId)

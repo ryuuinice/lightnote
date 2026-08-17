@@ -2,6 +2,8 @@
 
 mod auth;
 
+use base64::Engine as _;
+
 use auth::{parse_login_response, parse_refresh_response, FileCredentialStore, SessionMeta, TokenStore};
 use lightnote_core::blob::UreqBlobTransport;
 use lightnote_core::commands::Core;
@@ -12,7 +14,7 @@ use lightnote_core::util::now_ms;
 use serde::Serialize;
 use tauri::Emitter;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Manager, State};
 
@@ -51,7 +53,7 @@ impl Default for AppSettings {
     }
 }
 
-fn with_core<T>(state: &State<AppState>, f: impl FnOnce(&mut Core) -> lightnote_core::Result<T>) -> lightnote_core::Result<T> {
+fn with_core<T>(state: &AppState, f: impl FnOnce(&mut Core) -> lightnote_core::Result<T>) -> lightnote_core::Result<T> {
     let mut guard = state
         .core
         .lock()
@@ -82,7 +84,7 @@ fn uuid_v4_simple() -> String {
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn ensure_connected(state: &State<AppState>) -> lightnote_core::Result<()> {
+fn ensure_connected(state: &AppState) -> lightnote_core::Result<()> {
     let url = state.server_url.lock().expect("url lock").clone();
     if url.is_empty() {
         return Err(lightnote_core::Error::InvalidArgument("server url not configured".into()));
@@ -102,7 +104,7 @@ fn ensure_connected(state: &State<AppState>) -> lightnote_core::Result<()> {
     Ok(())
 }
 
-fn run_sync(state: &State<AppState>) -> lightnote_core::Result<lightnote_core::engine::SyncReport> {
+fn run_sync(state: &AppState) -> lightnote_core::Result<lightnote_core::engine::SyncReport> {
     ensure_connected(state)?;
     let report = {
         let engine_guard = state.engine.lock().expect("engine lock");
@@ -128,7 +130,7 @@ fn run_sync(state: &State<AppState>) -> lightnote_core::Result<lightnote_core::e
 }
 
 /// 令 access_token 作废后必须重建 engine/blob transport（它们持有旧 token）。
-fn rebuild_transports(state: &State<AppState>) {
+fn rebuild_transports(state: &AppState) {
     *state.engine.lock().expect("engine lock") = None;
     *state.blob_transport.lock().expect("blob lock") = None;
 }
@@ -136,7 +138,7 @@ fn rebuild_transports(state: &State<AppState>) {
 /// 清空全部会话状态（access+refresh+元信息），回到登录页。refresh 失败 / logout 调用。
 /// 清理后广播 session-cleared：运行中的 UI 若停留在主界面须切回登录页，
 /// 否则后续所有操作持续失败（设备吊销场景 AUTH-05）。
-fn clear_session(state: &State<AppState>) {
+fn clear_session(state: &AppState) {
     let dir = state.data_dir.lock().expect("dir lock").clone();
     if let Some(ts) = state.token_store.lock().expect("ts lock").as_ref() {
         let _ = ts.clear_refresh();
@@ -158,7 +160,7 @@ fn clear_session(state: &State<AppState>) {
 /// 持锁串行化：并发触发时后者等到前者完成后复查 token 有效性，直接复用，
 /// 避免两个并发 refresh 消费同一 refresh_token（第二次 401 → 误清有效会话）。
 /// 400/401/403（无效/吊销）→ 清会话；网络错误/5xx → 不清（瞬时）。
-fn do_refresh(state: &State<AppState>) -> Result<(), String> {
+fn do_refresh(state: &AppState) -> Result<(), String> {
     let _serial = state.refresh_lock.lock().expect("refresh lock poisoned");
     // double-check：等锁期间可能已有并发调用完成刷新
     {
@@ -211,7 +213,7 @@ fn do_refresh(state: &State<AppState>) -> Result<(), String> {
 }
 
 /// 调任何需要 server 的命令前确保 access_token 有效；过期则自动 refresh。
-fn ensure_valid_token(state: &State<AppState>) -> Result<(), String> {
+fn ensure_valid_token(state: &AppState) -> Result<(), String> {
     let now = now_ms();
     let expiry = *state.token_expiry.lock().expect("expiry lock");
     let has_token = !state.token.lock().expect("token lock").is_empty();
@@ -263,7 +265,7 @@ struct AuthStatus {
 }
 
 #[tauri::command]
-fn auth_status(state: State<AppState>) -> Result<AuthStatus, String> {
+fn auth_status(state: State<'_, Arc<AppState>>) -> Result<AuthStatus, String> {
     let has_refresh = state
         .token_store
         .lock()
@@ -283,87 +285,95 @@ fn auth_status(state: State<AppState>) -> Result<AuthStatus, String> {
 }
 
 #[tauri::command]
-fn auth_refresh(state: State<AppState>) -> Result<String, String> {
-    do_refresh(&state).map(|_| "ok".to_string())
+async fn auth_refresh(state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || do_refresh(&app).map(|_| "ok".to_string()))
+        .await
+        .map_err(|e| format!("refresh task panicked: {e}"))?
 }
 
 #[tauri::command]
-fn auth_login(
-    state: State<AppState>,
+async fn auth_login(
+    state: State<'_, Arc<AppState>>,
     server_url: String,
     username: String,
     password: String,
     device_name: String,
 ) -> Result<String, String> {
-    let base = server_url.trim_end_matches('/').to_string();
-    let url = format!("{base}/api/v1/auth/login");
-    let body = serde_json::json!({
-        "username": username,
-        "password": password,
-        "device_name": device_name,
-        "device_type": "desktop",
-    });
-    let resp = ureq::post(&url)
-        .timeout(Duration::from_secs(10))
-        .send_json(body);
-    let resp = match resp {
-        Ok(r) => r,
-        // ureq 2.x：非 2xx 走 Err(Status(..))；4xx 提取服务端错误消息，其余报状态码
-        Err(ureq::Error::Status(code, r)) => {
-            let msg = r
-                .into_json::<serde_json::Value>()
-                .ok()
-                .and_then(|v| v["message"].as_str().map(str::to_string))
-                .unwrap_or_else(|| format!("login failed: {code}"));
-            return Err(msg);
-        }
-        Err(e) => return Err(e.to_string()),
-    };
-    let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-    let t = parse_login_response(&v)?;
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let base = server_url.trim_end_matches('/').to_string();
+        let url = format!("{base}/api/v1/auth/login");
+        let body = serde_json::json!({
+            "username": username,
+            "password": password,
+            "device_name": device_name,
+            "device_type": "desktop",
+        });
+        let resp = ureq::post(&url)
+            .timeout(Duration::from_secs(10))
+            .send_json(body);
+        let resp = match resp {
+            Ok(r) => r,
+            // ureq 2.x：非 2xx 走 Err(Status(..))；4xx 提取服务端错误消息，其余报状态码
+            Err(ureq::Error::Status(code, r)) => {
+                let msg = r
+                    .into_json::<serde_json::Value>()
+                    .ok()
+                    .and_then(|v| v["message"].as_str().map(str::to_string))
+                    .unwrap_or_else(|| format!("login failed: {code}"));
+                return Err(msg);
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+        let t = parse_login_response(&v)?;
 
-    let dir = state.data_dir.lock().expect("dir lock").clone();
-    // client_id：沿用已有（session.json）或首登生成，保持同步游标跨重启稳定
-    let client_id = {
-        let existing = SessionMeta::load(&dir).map(|m| m.client_id).unwrap_or_default();
-        if !existing.is_empty() {
-            existing
-        } else {
-            format!("client-{}", uuid_v4_simple())
+        let dir = app.data_dir.lock().expect("dir lock").clone();
+        // client_id：沿用已有（session.json）或首登生成，保持同步游标跨重启稳定
+        let client_id = {
+            let existing = SessionMeta::load(&dir).map(|m| m.client_id).unwrap_or_default();
+            if !existing.is_empty() {
+                existing
+            } else {
+                format!("client-{}", uuid_v4_simple())
+            }
+        };
+        let meta = SessionMeta {
+            server_url: base.clone(),
+            device_id: t.device_id.clone().unwrap_or_default(),
+            device_name: device_name.clone(),
+            client_id: client_id.clone(),
+        };
+        meta.save(&dir).map_err(|e| e.to_string())?;
+        if let Some(rt) = &t.refresh_token {
+            let ts = app.token_store.lock().expect("ts lock");
+            if let Some(ts) = ts.as_ref() {
+                ts.save_refresh(rt).map_err(|e| e.to_string())?;
+            }
         }
-    };
-    let meta = SessionMeta {
-        server_url: base.clone(),
-        device_id: t.device_id.clone().unwrap_or_default(),
-        device_name: device_name.clone(),
-        client_id: client_id.clone(),
-    };
-    meta.save(&dir).map_err(|e| e.to_string())?;
-    if let Some(rt) = &t.refresh_token {
-        let ts = state.token_store.lock().expect("ts lock");
-        if let Some(ts) = ts.as_ref() {
-            ts.save_refresh(rt).map_err(|e| e.to_string())?;
-        }
-    }
-    *state.server_url.lock().expect("url lock") = base.clone();
-    *state.token.lock().expect("token lock") = t.access_token;
-    *state.token_expiry.lock().expect("expiry lock") = now_ms() + t.expires_in * 1000;
-    *state.device_id.lock().expect("dev id lock") = t.device_id.unwrap_or_default();
-    *state.device_name.lock().expect("dev lock") = device_name;
-    *state.client_id.lock().expect("client id lock") = client_id;
-    let mut settings = state.settings.lock().expect("settings lock");
-    settings.server_url = base;
-    rebuild_transports(&state);
-    Ok("ok".to_string())
+        *app.server_url.lock().expect("url lock") = base.clone();
+        *app.token.lock().expect("token lock") = t.access_token;
+        *app.token_expiry.lock().expect("expiry lock") = now_ms() + t.expires_in * 1000;
+        *app.device_id.lock().expect("dev id lock") = t.device_id.unwrap_or_default();
+        *app.device_name.lock().expect("dev lock") = device_name;
+        *app.client_id.lock().expect("client id lock") = client_id;
+        let mut settings = app.settings.lock().expect("settings lock");
+        settings.server_url = base;
+        rebuild_transports(&app);
+        Ok("ok".to_string())
+    })
+    .await
+    .map_err(|e| format!("login task panicked: {e}"))?
 }
 
 #[tauri::command]
-fn settings_get(state: State<AppState>) -> Result<AppSettings, String> {
+fn settings_get(state: State<'_, Arc<AppState>>) -> Result<AppSettings, String> {
     Ok(state.settings.lock().expect("settings lock").clone())
 }
 
 #[tauri::command]
-fn settings_update(state: State<AppState>, server_url: Option<String>, auto_sync: Option<bool>, sync_interval_sec: Option<u64>) -> Result<AppSettings, String> {
+fn settings_update(state: State<'_, Arc<AppState>>, server_url: Option<String>, auto_sync: Option<bool>, sync_interval_sec: Option<u64>) -> Result<AppSettings, String> {
     let mut s = state.settings.lock().expect("settings lock");
     if let Some(u) = server_url {
         let trimmed = u.trim_end_matches('/').to_string();
@@ -372,7 +382,7 @@ fn settings_update(state: State<AppState>, server_url: Option<String>, auto_sync
         *state.server_url.lock().expect("url lock") = s.server_url.clone();
         // 地址变更后旧 transport 仍连旧服务器：立即重建，下次 sync 即用新地址
         if changed {
-            rebuild_transports(&state);
+            rebuild_transports(state.inner());
         }
     }
     if let Some(a) = auto_sync {
@@ -389,27 +399,27 @@ fn settings_update(state: State<AppState>, server_url: Option<String>, auto_sync
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn notes_list(state: State<AppState>, parent_note_id: Option<String>, include_deleted: Option<bool>) -> Result<Vec<NoteMeta>, String> {
-    with_core(&state, |c| {
+fn notes_list(state: State<'_, Arc<AppState>>, parent_note_id: Option<String>, include_deleted: Option<bool>) -> Result<Vec<NoteMeta>, String> {
+    with_core(state.inner(), |c| {
         c.list_notes(parent_note_id.as_deref(), include_deleted.unwrap_or(false))
     })
     .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn notes_get(state: State<AppState>, note_id: String) -> Result<Note, String> {
-    with_core(&state, |c| c.get_note(&note_id)).map_err(|e| e.to_string())
+fn notes_get(state: State<'_, Arc<AppState>>, note_id: String) -> Result<Note, String> {
+    with_core(state.inner(), |c| c.get_note(&note_id)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn notes_create(state: State<AppState>, parent_note_id: String, title: String, note_type: Option<String>) -> Result<NoteMeta, String> {
-    with_core(&state, |c| c.create_note(&parent_note_id, &title, note_type.as_deref().unwrap_or("text")))
+fn notes_create(state: State<'_, Arc<AppState>>, parent_note_id: String, title: String, note_type: Option<String>) -> Result<NoteMeta, String> {
+    with_core(state.inner(), |c| c.create_note(&parent_note_id, &title, note_type.as_deref().unwrap_or("text")))
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn notes_update(state: State<AppState>, note_id: String, title: Option<String>) -> Result<NoteMeta, String> {
-    with_core(&state, |c| {
+fn notes_update(state: State<'_, Arc<AppState>>, note_id: String, title: Option<String>) -> Result<NoteMeta, String> {
+    with_core(state.inner(), |c| {
         let t = title.unwrap_or_else(|| c.get_note(&note_id).map(|n| n.title).unwrap_or_default());
         c.update_note(&note_id, &t)
     })
@@ -417,13 +427,13 @@ fn notes_update(state: State<AppState>, note_id: String, title: Option<String>) 
 }
 
 #[tauri::command]
-fn notes_delete(state: State<AppState>, note_id: String) -> Result<(), String> {
-    with_core(&state, |c| c.delete_note(&note_id)).map_err(|e| e.to_string())
+fn notes_delete(state: State<'_, Arc<AppState>>, note_id: String) -> Result<(), String> {
+    with_core(state.inner(), |c| c.delete_note(&note_id)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn notes_save_content(state: State<AppState>, note_id: String, content: String) -> Result<String, String> {
-    with_core(&state, |c| c.save_content(&note_id, &content)).map_err(|e| e.to_string())
+fn notes_save_content(state: State<'_, Arc<AppState>>, note_id: String, content: String) -> Result<String, String> {
+    with_core(state.inner(), |c| c.save_content(&note_id, &content)).map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -433,19 +443,23 @@ struct NoteContent {
 }
 
 #[tauri::command]
-fn notes_get_content(state: State<AppState>, note_id: String) -> Result<NoteContent, String> {
-    let (blob_id, content) = with_core(&state, |c| c.get_content(&note_id)).map_err(|e| e.to_string())?;
+fn notes_get_content(state: State<'_, Arc<AppState>>, note_id: String) -> Result<NoteContent, String> {
+    let (blob_id, content) = with_core(state.inner(), |c| c.get_content(&note_id)).map_err(|e| e.to_string())?;
     Ok(NoteContent { blob_id, content })
 }
 
 #[tauri::command]
-fn notes_restore(state: State<AppState>, note_id: String) -> Result<NoteMeta, String> {
-    with_core(&state, |c| c.restore_note(&note_id)).map_err(|e| e.to_string())
+fn notes_restore(state: State<'_, Arc<AppState>>, note_id: String) -> Result<NoteMeta, String> {
+    with_core(state.inner(), |c| c.restore_note(&note_id)).map_err(|e| e.to_string())
 }
 
+/// 附件数据走 base64：JSON 数字数组传输会使体积膨胀 3-9 倍且序列化开销大
 #[tauri::command]
-fn notes_attach(state: State<AppState>, parent_note_id: String, name: String, mime_type: String, data: Vec<u8>) -> Result<NoteMeta, String> {
-    with_core(&state, |c| c.attach_bytes(&parent_note_id, &name, &mime_type, &data)).map_err(|e| e.to_string())
+fn notes_attach(state: State<'_, Arc<AppState>>, parent_note_id: String, name: String, mime_type: String, data_base64: String) -> Result<NoteMeta, String> {
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| format!("invalid base64 attachment: {e}"))?;
+    with_core(state.inner(), |c| c.attach_bytes(&parent_note_id, &name, &mime_type, &data)).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -453,82 +467,87 @@ fn notes_attach(state: State<AppState>, parent_note_id: String, name: String, mi
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn tree_children(state: State<AppState>, parent_note_id: String) -> Result<Vec<NoteMeta>, String> {
-    with_core(&state, |c| c.tree_children(&parent_note_id)).map_err(|e| e.to_string())
+fn tree_children(state: State<'_, Arc<AppState>>, parent_note_id: String) -> Result<Vec<NoteMeta>, String> {
+    with_core(state.inner(), |c| c.tree_children(&parent_note_id)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn tree_move(state: State<AppState>, note_id: String, new_parent_note_id: String, new_sort_order: Option<i64>) -> Result<(), String> {
-    with_core(&state, |c| c.move_note_to(&note_id, &new_parent_note_id, new_sort_order)).map_err(|e| e.to_string())
+fn tree_move(state: State<'_, Arc<AppState>>, note_id: String, new_parent_note_id: String, new_sort_order: Option<i64>) -> Result<(), String> {
+    with_core(state.inner(), |c| c.move_note_to(&note_id, &new_parent_note_id, new_sort_order)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn search_query(state: State<AppState>, query: String, limit: Option<usize>) -> Result<Vec<SearchResult>, String> {
-    with_core(&state, |c| c.search(&query, limit.unwrap_or(20))).map_err(|e| e.to_string())
+fn search_query(state: State<'_, Arc<AppState>>, query: String, limit: Option<usize>) -> Result<Vec<SearchResult>, String> {
+    with_core(state.inner(), |c| c.search(&query, limit.unwrap_or(20))).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn tags_list(state: State<AppState>, note_id: Option<String>) -> Result<Vec<lightnote_core::models::Tag>, String> {
-    with_core(&state, |c| c.tags_list(note_id.as_deref())).map_err(|e| e.to_string())
+fn tags_list(state: State<'_, Arc<AppState>>, note_id: Option<String>) -> Result<Vec<lightnote_core::models::Tag>, String> {
+    with_core(state.inner(), |c| c.tags_list(note_id.as_deref())).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn tags_add(state: State<AppState>, note_id: String, name: String, value: Option<String>) -> Result<Attribute, String> {
-    with_core(&state, |c| c.tags_add(&note_id, &name, value.as_deref())).map_err(|e| e.to_string())
+fn tags_add(state: State<'_, Arc<AppState>>, note_id: String, name: String, value: Option<String>) -> Result<Attribute, String> {
+    with_core(state.inner(), |c| c.tags_add(&note_id, &name, value.as_deref())).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn tags_remove(state: State<AppState>, attribute_id: String) -> Result<(), String> {
-    with_core(&state, |c| c.tags_remove(&attribute_id)).map_err(|e| e.to_string())
+fn tags_remove(state: State<'_, Arc<AppState>>, attribute_id: String) -> Result<(), String> {
+    with_core(state.inner(), |c| c.tags_remove(&attribute_id)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn trash_list(state: State<AppState>) -> Result<Vec<NoteMeta>, String> {
-    with_core(&state, |c| c.trash_list()).map_err(|e| e.to_string())
+fn trash_list(state: State<'_, Arc<AppState>>) -> Result<Vec<NoteMeta>, String> {
+    with_core(state.inner(), |c| c.trash_list()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn conflicts_list(state: State<AppState>) -> Result<Vec<ConflictInfo>, String> {
-    with_core(&state, |c| c.conflicts_list()).map_err(|e| e.to_string())
+fn conflicts_list(state: State<'_, Arc<AppState>>) -> Result<Vec<ConflictInfo>, String> {
+    with_core(state.inner(), |c| c.conflicts_list()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn conflicts_resolve(state: State<AppState>, conflict_note_id: String, action: String) -> Result<(), String> {
+fn conflicts_resolve(state: State<'_, Arc<AppState>>, conflict_note_id: String, action: String) -> Result<(), String> {
     let keep = match action.as_str() {
         "keep_conflict" => true,
         "discard_conflict" => false,
         other => return Err(format!("invalid action: {other}")),
     };
-    with_core(&state, |c| c.conflicts_resolve(&conflict_note_id, keep)).map_err(|e| e.to_string())
+    with_core(state.inner(), |c| c.conflicts_resolve(&conflict_note_id, keep)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn trash_empty(state: State<AppState>) -> Result<i64, String> {
-    with_core(&state, |c| c.trash_empty()).map_err(|e| e.to_string())
+fn trash_empty(state: State<'_, Arc<AppState>>) -> Result<i64, String> {
+    with_core(state.inner(), |c| c.trash_empty()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn blobs_get(state: State<AppState>, blob_id: String) -> Result<Vec<u8>, String> {
-    with_core(&state, |c| c.blobs_get(&blob_id)).map_err(|e| e.to_string())
+fn blobs_get(state: State<'_, Arc<AppState>>, blob_id: String) -> Result<Vec<u8>, String> {
+    with_core(state.inner(), |c| c.blobs_get(&blob_id)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn blobs_exists(state: State<AppState>, blob_id: String) -> Result<bool, String> {
-    with_core(&state, |c| c.blobs_exists(&blob_id)).map_err(|e| e.to_string())
+fn blobs_exists(state: State<'_, Arc<AppState>>, blob_id: String) -> Result<bool, String> {
+    with_core(state.inner(), |c| c.blobs_exists(&blob_id)).map_err(|e| e.to_string())
 }
 
 /// 按需下载单个 blob（Lazy Download 补拉：打开笔记但本地正文/附件缺失时）
 #[tauri::command]
-fn blobs_download(state: State<AppState>, blob_id: String) -> Result<(), String> {
-    ensure_connected(&state).map_err(|e| e.to_string())?;
-    let blob_guard = state.blob_transport.lock().expect("blob lock");
-    let blob = blob_guard.as_ref().ok_or_else(|| "blob transport not ready".to_string())?;
-    with_core(&state, |c| c.blob_download(blob, &blob_id)).map_err(|e| e.to_string())
+async fn blobs_download(state: State<'_, Arc<AppState>>, blob_id: String) -> Result<(), String> {
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        ensure_connected(&app).map_err(|e| e.to_string())?;
+        let blob_guard = app.blob_transport.lock().expect("blob lock");
+        let blob = blob_guard.as_ref().ok_or_else(|| "blob transport not ready".to_string())?;
+        with_core(&app, |c| c.blob_download(blob, &blob_id)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("download task panicked: {e}"))?
 }
 
 #[tauri::command]
-fn settings_logout(state: State<AppState>) -> Result<(), String> {
-    clear_session(&state);
+fn settings_logout(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    clear_session(state.inner());
     Ok(())
 }
 
@@ -544,58 +563,68 @@ struct DeviceEntry {
 }
 
 #[tauri::command]
-fn devices_list(state: State<AppState>) -> Result<Vec<DeviceEntry>, String> {
-    ensure_valid_token(&state)?;
-    let url = state.server_url.lock().expect("url lock").clone();
-    let token = state.token.lock().expect("token lock").clone();
-    if url.is_empty() || token.is_empty() {
-        return Ok(vec![]);
-    }
-    let resp = ureq::get(&format!("{url}/api/v1/devices"))
-        .set("Authorization", &format!("Bearer {token}"))
-        .timeout(Duration::from_secs(10))
-        .call()
-        .map_err(|e| e.to_string())?;
-    let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
-    let Some(arr) = v["devices"].as_array() else {
-        return Ok(vec![]);
-    };
-    // 服务端返回 snake_case，前端契约是 camelCase：此处统一转换
-    let mut out = Vec::with_capacity(arr.len());
-    for d in arr {
-        out.push(DeviceEntry {
-            device_id: d["device_id"].as_str().unwrap_or_default().to_string(),
-            device_name: d["device_name"].as_str().unwrap_or_default().to_string(),
-            device_type: d["device_type"].as_str().map(str::to_string),
-            last_seen: d["last_seen"].as_i64().unwrap_or(0),
-            revoked_at: d["revoked_at"].as_i64(),
-            created_at: d["created_at"].as_i64().unwrap_or(0),
-        });
-    }
-    Ok(out)
+async fn devices_list(state: State<'_, Arc<AppState>>) -> Result<Vec<DeviceEntry>, String> {
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<DeviceEntry>, String> {
+        ensure_valid_token(&app)?;
+        let url = app.server_url.lock().expect("url lock").clone();
+        let token = app.token.lock().expect("token lock").clone();
+        if url.is_empty() || token.is_empty() {
+            return Ok(vec![]);
+        }
+        let resp = ureq::get(&format!("{url}/api/v1/devices"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .timeout(Duration::from_secs(10))
+            .call()
+            .map_err(|e| e.to_string())?;
+        let v: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+        let Some(arr) = v["devices"].as_array() else {
+            return Ok(vec![]);
+        };
+        // 服务端返回 snake_case，前端契约是 camelCase：此处统一转换
+        let mut out = Vec::with_capacity(arr.len());
+        for d in arr {
+            out.push(DeviceEntry {
+                device_id: d["device_id"].as_str().unwrap_or_default().to_string(),
+                device_name: d["device_name"].as_str().unwrap_or_default().to_string(),
+                device_type: d["device_type"].as_str().map(str::to_string),
+                last_seen: d["last_seen"].as_i64().unwrap_or(0),
+                revoked_at: d["revoked_at"].as_i64(),
+                created_at: d["created_at"].as_i64().unwrap_or(0),
+            });
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("devices task panicked: {e}"))?
 }
 
 #[tauri::command]
-fn devices_revoke(state: State<AppState>, device_id: String) -> Result<(), String> {
-    ensure_valid_token(&state)?;
-    let url = state.server_url.lock().expect("url lock").clone();
-    let token = state.token.lock().expect("token lock").clone();
-    let resp = ureq::delete(&format!("{url}/api/v1/devices/{device_id}"))
-        .set("Authorization", &format!("Bearer {token}"))
-        .timeout(Duration::from_secs(10))
-        .call();
-    match resp {
-        Ok(_) => Ok(()),
-        Err(ureq::Error::Status(code, r)) => {
-            let msg = r
-                .into_json::<serde_json::Value>()
-                .ok()
-                .and_then(|v| v["message"].as_str().map(str::to_string))
-                .unwrap_or_else(|| format!("revoke failed: {code}"));
-            Err(msg)
+async fn devices_revoke(state: State<'_, Arc<AppState>>, device_id: String) -> Result<(), String> {
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        ensure_valid_token(&app)?;
+        let url = app.server_url.lock().expect("url lock").clone();
+        let token = app.token.lock().expect("token lock").clone();
+        let resp = ureq::delete(&format!("{url}/api/v1/devices/{device_id}"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .timeout(Duration::from_secs(10))
+            .call();
+        match resp {
+            Ok(_) => Ok(()),
+            Err(ureq::Error::Status(code, r)) => {
+                let msg = r
+                    .into_json::<serde_json::Value>()
+                    .ok()
+                    .and_then(|v| v["message"].as_str().map(str::to_string))
+                    .unwrap_or_else(|| format!("revoke failed: {code}"));
+                Err(msg)
+            }
+            Err(e) => Err(e.to_string()),
         }
-        Err(e) => Err(e.to_string()),
-    }
+    })
+    .await
+    .map_err(|e| format!("revoke task panicked: {e}"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -603,8 +632,8 @@ fn devices_revoke(state: State<AppState>, device_id: String) -> Result<(), Strin
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
-    let mut status = with_core(&state, |c| c.sync_status()).map_err(|e| e.to_string())?;
+fn sync_status(state: State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
+    let mut status = with_core(state.inner(), |c| c.sync_status()).map_err(|e| e.to_string())?;
     let engine_guard = state.engine.lock().expect("engine lock");
     if let Some(engine) = engine_guard.as_ref() {
         let es = engine.status();
@@ -618,10 +647,16 @@ fn sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 }
 
 #[tauri::command]
-fn sync_trigger(state: State<AppState>) -> Result<String, String> {
-    ensure_valid_token(&state)?;
-    run_sync(&state).map(|r| format!("pushed={} pulled={} cursor={}", r.pushed, r.pulled, r.cursor))
-        .map_err(|e| e.to_string())
+async fn sync_trigger(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    // 阻塞式 HTTP（ureq）+ 全量 push/pull 必须离开主线程，否则同步期间窗口事件循环冻结
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        ensure_valid_token(&app)?;
+        let report = run_sync(&app).map_err(|e| e.to_string())?;
+        serde_json::to_value(&report).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("sync task panicked: {e}"))?
 }
 
 fn main() {
@@ -643,7 +678,7 @@ fn main() {
     };
 
     tauri::Builder::default()
-        .manage(app_state)
+        .manage(Arc::new(app_state))
         .invoke_handler(tauri::generate_handler![
             auth_login,
             auth_status,

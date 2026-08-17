@@ -42,6 +42,12 @@ impl BlobManager {
         self.local_path(blob_id).is_file()
     }
 
+    /// 尽力而为删除本地 blob 文件（GC 用）：文件不存在或删除失败均返回 false，
+    /// 失败时留待下次 GC，不构成错误。
+    pub fn delete_local(&self, blob_id: &str) -> bool {
+        fs::remove_file(self.local_path(blob_id)).is_ok()
+    }
+
     pub fn read_local(&self, blob_id: &str) -> Result<Vec<u8>> {
         let path = self.local_path(blob_id);
         fs::read(&path).map_err(|_| Error::BlobMissing(blob_id.to_string()))

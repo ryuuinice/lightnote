@@ -1529,3 +1529,37 @@ fn sync_report_surfaces_blob_failures() {
     let report = core.sync_trigger_with_blob(&engine, &transport).unwrap();
     assert_eq!(report.blob_download_failed, 1, "download failure must surface in report, got {report:?}");
 }
+
+// GC：编辑历史产生的无引用 blob 被回收；当前引用与未推送 blob 必须保留
+#[test]
+fn blob_gc_removes_unreferenced_and_keeps_live() {
+    let mut core = core();
+    let note = core.create_note("root", "n", "text").unwrap();
+    let old = core.save_content(&note.note_id, "v1").unwrap();
+    let cur = core.save_content(&note.note_id, "v2").unwrap();
+    assert!(core.blobs().has_local(&old));
+    // 两份 blob 的 CREATE change 均未 push（outbox 有行）——不得回收
+    assert_eq!(core.blob_gc().unwrap(), 0);
+    assert!(core.blobs().has_local(&old));
+    // 模拟已 push（服务端有副本）：清空 outbox 后旧版本可回收
+    core.db().connection().execute("DELETE FROM sync_outbox", []).unwrap();
+    assert_eq!(core.blob_gc().unwrap(), 1);
+    assert!(!core.blobs().has_local(&old), "unreferenced blob file removed");
+    assert!(core.blobs().has_local(&cur), "live blob kept");
+    // 二次 GC 幂等
+    assert_eq!(core.blob_gc().unwrap(), 0);
+}
+
+// GC：tombstone 引用的 blob（恢复需要）不回收；trash_empty 物理删除后随挂钩回收
+#[test]
+fn blob_gc_keeps_tombstone_referenced_blob_until_trash_empty() {
+    let mut core = core();
+    let note = core.create_note("root", "n", "text").unwrap();
+    let blob = core.save_content(&note.note_id, "content").unwrap();
+    core.db().connection().execute("DELETE FROM sync_outbox", []).unwrap();
+    core.delete_note(&note.note_id).unwrap();
+    assert_eq!(core.blob_gc().unwrap(), 0, "tombstone still references blob");
+    assert!(core.blobs().has_local(&blob));
+    core.trash_empty().unwrap();
+    assert!(!core.blobs().has_local(&blob), "trash_empty triggers blob GC");
+}

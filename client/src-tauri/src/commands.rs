@@ -577,7 +577,47 @@ impl Core {
             deleted += 1;
         }
         tx.commit()?;
+        let _ = self.blob_gc()?;
         Ok(deleted)
+    }
+
+    /// 本地 blob 垃圾回收：删除不再被任何笔记（含 tombstone——恢复时需要）引用、
+    /// 无待推送 blob Change（尚未同步到服务端，删了即永久丢失）、不在懒下载队列的
+    /// blob 文件与表行。已推送过的 blob 服务端仍有副本，将来重新引用时经懒下载取回。
+    /// 文件删除在表行事务提交之后进行，失败仅留孤儿文件，不破坏一致性。
+    pub fn blob_gc(&mut self) -> Result<usize> {
+        let ids: Vec<String> = {
+            let conn = self.db.connection();
+            let mut stmt = conn.prepare(
+                "SELECT b.blob_id FROM blobs b
+                 WHERE NOT EXISTS (SELECT 1 FROM notes n WHERE n.blob_id = b.blob_id)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM sync_outbox o
+                       JOIN entity_changes c ON c.change_id = o.change_id
+                       WHERE c.entity_type = 'blob' AND c.entity_id = b.blob_id)
+                   AND NOT EXISTS (SELECT 1 FROM blob_download_queue q WHERE q.blob_id = b.blob_id)",
+            )?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("DELETE FROM blobs WHERE blob_id IN ({placeholders})");
+        let params: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let tx = self.db.tx()?;
+        tx.execute(&sql, params.as_slice())?;
+        tx.commit()?;
+        let mut removed = 0;
+        for id in &ids {
+            if self.blob_manager.delete_local(id) {
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     pub fn blobs_get(&self, blob_id: &str) -> Result<Vec<u8>> {

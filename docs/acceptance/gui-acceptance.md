@@ -1,7 +1,7 @@
 # LightNote GUI 延迟验收协议（GUI-001 ~ GUI-008 + AUTH-01 ~ AUTH-06）+ 双设备 E2E 执行包
 
-> **状态：** Deferred Acceptance（延迟验收）  
-> **执行环境：** 带显示器的 Windows 真机（当前开发环境为无头环境，**无法运行 Tauri GUI**）  
+> **状态：** ✅ 已完成（2026-08-15，Windows 双实例真机 14/14 全 PASS：GUI-001~008 + AUTH-01~08，结论见 `rc1-audit-report.md` §2）  
+> **执行环境：** 带显示器的 Windows 真机（协议编写时为无头环境无法运行 Tauri GUI，故列为 Deferred；已于 RC 前执行完毕）  
 > **目的：** 仅验证「真实用户操作链路」在 Tauri 桌面壳 + Vue UI 下的端到端可用性，含 Phase 9.2a 客户端 Auth Session（refresh-token / 重启恢复）。
 
 ## 0. 适用范围与分层原则（先读）

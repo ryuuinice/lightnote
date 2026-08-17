@@ -30,10 +30,14 @@ Phase 9 第一项可自动化交付：服务端/同步大规模吞吐基准（me
 
 ### Deferred：GUI-001~008（Windows 真机）
 
+> **✅ 状态更新（v1.1-rc1）：已执行，14/14 全 PASS**（GUI-001~008 + AUTH-01~08，Windows 双实例真机，见下文 v1.1-rc1 节与 `docs/acceptance/rc1-audit-report.md` §2）。以下为 phase9.2 时点的原始记录。
+
 `docs/acceptance/gui-acceptance.md`：完整 Deferred 验收协议（登录/双向 Pull/删除/冲突/Blob/离线恢复/重启恢复）
 + 双设备 E2E 执行包。本无头环境不可执行；待 Windows 显示环境一次性验收。
 
 ### 已发现 Client 集成缺口（→ Phase 9.2a 跟进）
+
+> **✅ 状态更新（v1.1-rc1）：已修复并真机验证**（AUTH-01~08 全过，含 refresh-token 接线、重启恢复、吊销后凭据物理删除）。以下为 phase9.2 时点的原始记录。
 
 客户端 Tauri shell（`client/app/src/main.rs`）**未接入 refresh-token**：`auth_login` 仅取 access_token 入内存，
 丢弃 refresh_token / device_id；未注册 `auth_refresh`；token 仅内存（重启即失效）。服务端 Phase 6 refresh-token

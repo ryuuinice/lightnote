@@ -98,16 +98,24 @@ export const useNotesStore = defineStore('notes', {
     },
 
     async createAndOpen(parentNoteId: string): Promise<void> {
-      const created = await ipc.invoke('notes.create', { parentNoteId, title: '未命名' })
-      await this.loadTree()
-      await this.loadNotes(parentNoteId)
-      await this.openNote(created.noteId)
+      try {
+        const created = await ipc.invoke('notes.create', { parentNoteId, title: '未命名' })
+        await this.loadTree()
+        await this.loadNotes(parentNoteId)
+        await this.openNote(created.noteId)
+      } catch (e) {
+        window.showError(e)
+      }
     },
 
     async createFolder(parentNoteId: string): Promise<void> {
-      await ipc.invoke('notes.create', { parentNoteId, title: '新目录', noteType: 'folder' })
-      await this.loadTree()
-      await this.loadNotes(parentNoteId)
+      try {
+        await ipc.invoke('notes.create', { parentNoteId, title: '新目录', noteType: 'folder' })
+        await this.loadTree()
+        await this.loadNotes(parentNoteId)
+      } catch (e) {
+        window.showError(e)
+      }
     },
 
     async selectTreeParent(noteId: string): Promise<void> {
@@ -118,7 +126,12 @@ export const useNotesStore = defineStore('notes', {
 
     async moveNote(noteId: string, newParentNoteId: string): Promise<void> {
       if (noteId === newParentNoteId) return
-      await ipc.invoke('tree.move', { noteId, newParentNoteId })
+      try {
+        await ipc.invoke('tree.move', { noteId, newParentNoteId })
+      } catch (e) {
+        window.showError(e)
+        return
+      }
       await this.loadTree()
       await this.loadNotes(this.selectedTreeParent)
     },
@@ -142,8 +155,9 @@ export const useNotesStore = defineStore('notes', {
       try {
         await ipc.invoke('notes.saveContent', { noteId, content })
         return true
-      } catch {
+      } catch (e) {
         if (this.currentNote?.noteId === noteId) this.dirty = true
+        window.showError(new Error(`保存失败（内容仍在编辑区，可重试 Ctrl+S）：${String((e as { message?: string })?.message ?? e)}`))
         return false
       }
     },
@@ -171,10 +185,44 @@ export const useNotesStore = defineStore('notes', {
       if (!this.currentNote) return
       const noteId = this.currentNote.noteId
       if (this.currentNote.title === title) return
-      const updated = await ipc.invoke('notes.update', { noteId, title })
-      if (this.currentNote?.noteId === noteId) this.currentNote.title = updated.title
-      const listNote = this.notes.find((note) => note.noteId === noteId)
-      if (listNote) listNote.title = updated.title
+      try {
+        const updated = await ipc.invoke('notes.update', { noteId, title })
+        if (this.currentNote?.noteId === noteId) this.currentNote.title = updated.title
+        const listNote = this.notes.find((note) => note.noteId === noteId)
+        if (listNote) listNote.title = updated.title
+        this.syncTreeTitle(noteId, updated.title)
+      } catch (e) {
+        window.showError(e)
+      }
+    },
+
+    /// 树内节点改名后同步标题显示（不动层级结构）
+    syncTreeTitle(noteId: string, title: string): void {
+      const walk = (nodes: TreeNode[]): boolean => {
+        for (const n of nodes) {
+          if (n.noteId === noteId) {
+            n.title = title
+            return true
+          }
+          if (n.children && walk(n.children)) return true
+        }
+        return false
+      }
+      walk(this.tree)
+    },
+
+    /// 任意节点（含目录）改名：F2 / 右键菜单入口统一走这里
+    async renameNote(noteId: string, title: string): Promise<void> {
+      if (!title.trim()) return
+      try {
+        await ipc.invoke('notes.update', { noteId, title: title.trim() })
+        this.syncTreeTitle(noteId, title.trim())
+        if (this.currentNote?.noteId === noteId) this.currentNote.title = title.trim()
+        const listNote = this.notes.find((note) => note.noteId === noteId)
+        if (listNote) listNote.title = title.trim()
+      } catch (e) {
+        window.showError(e)
+      }
     },
 
     async deleteNote(noteId: string): Promise<void> {
@@ -192,9 +240,16 @@ export const useNotesStore = defineStore('notes', {
     },
 
     async restoreNote(noteId: string): Promise<void> {
-      await ipc.invoke('notes.restore', { noteId })
+      try {
+        await ipc.invoke('notes.restore', { noteId })
+      } catch (e) {
+        window.showError(e)
+        return
+      }
       await this.loadTrash()
       await this.loadTree()
+      // 恢复的笔记可能落在当前列表所属目录下，刷新让用户立刻看到
+      await this.loadNotes(this.selectedTreeParent)
     },
 
     async loadTrash(): Promise<void> {

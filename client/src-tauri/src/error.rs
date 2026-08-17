@@ -77,7 +77,13 @@ impl From<std::io::Error> for Error {
 
 impl From<ureq::Error> for Error {
     fn from(e: ureq::Error) -> Self {
-        Error::Sync(e.to_string())
+        // ureq 2.x：非 2xx 走 Err(Status(code, _))。401/403 = 会话/设备被服务端拒绝，
+        // 映射为 NotAuthenticated 让壳层走 refresh 恢复（或 fatal 清会话），
+        // 其余状态保持 Sync 字符串。
+        match &e {
+            ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => Error::NotAuthenticated,
+            _ => Error::Sync(e.to_string()),
+        }
     }
 }
 

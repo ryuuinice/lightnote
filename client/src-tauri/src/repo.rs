@@ -97,6 +97,8 @@ pub fn list_notes(conn: &Connection, parent_note_id: Option<&str>, include_delet
         None | Some(ROOT_NOTE_ID) => None,
         Some(p) => Some(p),
     };
+    // 根列表 = parent='root' 的 branch 子节点（新语义，v1.1.1 起根级也建 branch）
+    //          ∪ 无任何活跃 branch 的笔记（旧数据/历史版本兼容，NOT EXISTS 兜底）
     let sql = if parent.is_some() {
         format!(
             "SELECT {NOTE_COLS_N}, b.sort_order FROM branches b
@@ -106,10 +108,14 @@ pub fn list_notes(conn: &Connection, parent_note_id: Option<&str>, include_delet
         )
     } else {
         format!(
-            "SELECT {NOTE_COLS_N}, 0 FROM notes n
+            "SELECT {NOTE_COLS_N}, b.sort_order FROM branches b
+             JOIN notes n ON n.note_id = b.child_note_id
+             WHERE b.parent_note_id = 'root' AND b.is_deleted = 0 AND {deleted_filter}
+             UNION
+             SELECT {NOTE_COLS_N}, 0 FROM notes n
              WHERE {deleted_filter}
                AND NOT EXISTS (SELECT 1 FROM branches b WHERE b.child_note_id = n.note_id AND b.is_deleted = 0)
-             ORDER BY n.updated_at DESC"
+             ORDER BY sort_order ASC, updated_at DESC"
         )
     };
     let mut stmt = conn.prepare(&sql)?;
@@ -153,6 +159,46 @@ pub fn list_conflicts(conn: &Connection) -> Result<Vec<crate::models::ConflictIn
             updated_at: r.get(4)?,
             updated_by: r.get(5)?,
         })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// 递归收集 note 的全部存活子孙 note_id（沿活跃 branch 边，含已删子孙——级联删除需要）。
+/// 使用 SQLite 递归 CTE；排除起点自身，防环由 visited 语义保证（CTE 不会重复访问已见节点）。
+pub fn list_descendant_note_ids(conn: &Connection, note_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE desc(child_id) AS (
+            SELECT b.child_note_id FROM branches b
+            WHERE b.parent_note_id = ?1 AND b.is_deleted = 0
+            UNION
+            SELECT b2.child_note_id FROM branches b2
+            JOIN desc ON b2.parent_note_id = desc.child_id
+            WHERE b2.is_deleted = 0
+         )
+         SELECT DISTINCT child_id FROM desc WHERE child_id != ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![note_id], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// 沿活跃 branch 边向上收集仍处于已删除状态的祖先 (note_id, version)，从近到远。
+/// 用于级联删除后的恢复：restore 一并拉活祖先链。
+pub fn list_deleted_ancestors(conn: &Connection, note_id: &str) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE anc(id) AS (
+            SELECT b.parent_note_id FROM branches b
+            WHERE b.child_note_id = ?1 AND b.is_deleted = 0 AND b.parent_note_id != 'root'
+            UNION
+            SELECT b2.parent_note_id FROM branches b2
+            JOIN anc ON b2.child_note_id = anc.id
+            WHERE b2.is_deleted = 0 AND b2.parent_note_id != 'root'
+         )
+         SELECT n.note_id, n.version FROM notes n
+         JOIN anc ON n.note_id = anc.id
+         WHERE n.is_deleted = 1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![note_id], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }

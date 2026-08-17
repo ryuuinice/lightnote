@@ -108,8 +108,9 @@ fn t5_push_idempotent() {
         10,
     )
     .unwrap();
-    assert_eq!(ids.len(), 1);
-    let ch = lightnote_core::change::get_change(a.core.db().connection(), &ids[0])
+    // v1.1.1 起根级创建含 branch CREATE + note CREATE 两条 change
+    assert_eq!(ids.len(), 2);
+    let ch = lightnote_core::change::get_change(a.core.db().connection(), &ids[1])
         .unwrap()
         .unwrap();
     assert_eq!(ch.entity_id, note.note_id);
@@ -154,7 +155,7 @@ fn t6_cursor_batch_pull() {
         ids.push(n.note_id);
     }
     a.sync();
-    assert_eq!(a.cursor(), 3);
+    assert_eq!(a.cursor(), 6);
     assert_eq!(a.outbox_count(), 0);
 
     b.limit_pull(1);
@@ -170,8 +171,9 @@ fn t6_cursor_batch_pull() {
         last = c;
         pulled += n;
     }
-    assert_eq!(pulled, 3);
-    assert_eq!(last, 3);
+    // 3 笔记 × (branch + note) = 6 条
+    assert_eq!(pulled, 6);
+    assert_eq!(last, 6);
     assert_eq!(b.cursor(), a.cursor());
     let notes = b.core.list_notes(None, false).unwrap();
     assert_eq!(notes.len(), 3);

@@ -82,10 +82,10 @@ fn cursor_persists_across_restart_and_replay_is_idempotent() {
     let mut b_slow = b;
     b_slow.limit_pull(1);
     b_slow.sync();
-    assert_eq!(b_slow.cursor(), 7, "批量同步后 cursor=7（3 笔记 + 1 blob，内容寻址去重）；去重是预期行为");
+    assert_eq!(b_slow.cursor(), 10, "批量同步后 cursor=10（v1.1.1 起根级笔记含 branch：3×(branch+note) + 1 blob 去重）；去重是预期行为");
 
     let reopened = Client::from_paths(&server, "B", &db_path, &blobs_path, &token);
-    assert_eq!(reopened.cursor(), 7, "重启后 cursor 持久化");
+    assert_eq!(reopened.cursor(), 10, "重启后 cursor 持久化");
     let mut reopened = reopened;
     reopened.sync();
     assert_eq!(
@@ -93,7 +93,7 @@ fn cursor_persists_across_restart_and_replay_is_idempotent() {
         3,
         "重放幂等，无重复"
     );
-    assert_eq!(reopened.cursor(), 7, "无新变更，cursor 不前进");
+    assert_eq!(reopened.cursor(), 10, "无新变更，cursor 不前进");
     drop(server);
 }
 
@@ -175,7 +175,7 @@ fn duplicate_pull_change_id_is_idempotent() {
     let transport = b.raw_transport();
     let engine = SyncEngine::new(Box::new(transport), format!("client-{}", b.name));
     let pulled = engine.pull_once(b.core.db_mut()).expect("first pull");
-    assert_eq!(pulled, 3, "一次拉取 3 条变更（note CREATE + blob CREATE + note UPDATE）");
+    assert_eq!(pulled, 4, "一次拉取 4 条变更（branch CREATE + note CREATE + blob CREATE + note UPDATE）");
     let pulled_again = engine.pull_once(b.core.db_mut()).expect("second pull");
     assert_eq!(pulled_again, 0, "重复 Pull 不产生重复应用");
     assert_eq!(b.core.get_note(&note_id).expect("get").title, "幂等");

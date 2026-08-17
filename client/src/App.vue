@@ -12,17 +12,36 @@ import TrashPanel from './components/TrashPanel.vue'
 import SyncStatusBar from './components/SyncStatusBar.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import CommandPalette from './components/CommandPalette.vue'
+import ToastHost from './components/ToastHost.vue'
 
 const store = useNotesStore()
 const showSettings = ref(false)
 const needsLogin = ref(false)
 const loading = ref(true)
+let unlistenClose: (() => void) | null = null
+let closing = false
 
 onMounted(async () => {
   // 全局快捷键 / 设置事件必须在任何 early-return（登录页）之前注册，
   // 否则交互式登录后 onLoggedIn 不会补注册，快捷键全部失效
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('open-settings', onOpenSettings)
+  // 关窗前 flush：壳层 CloseRequested 拦截后 emit 本事件，保存完再真正销毁窗口
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    unlistenClose = await getCurrentWindow().listen<boolean>('close-requested', async () => {
+      if (closing) return
+      closing = true
+      try {
+        await store.saveNow()
+      } catch {
+        // 保存失败也放行关闭：数据仍在防抖内容缓冲中，下次启动 outbox 可部分恢复
+      }
+      await getCurrentWindow().destroy()
+    })
+  } catch {
+    // 浏览器/mock 环境：无 Tauri window API
+  }
   try {
     await store.loadSettings()
     // 启动恢复：若存在持久化会话，用 refresh_token 换新 access_token 后直接进主界面
@@ -40,6 +59,8 @@ onMounted(async () => {
     }
     await store.loadTree()
     await store.loadNotes()
+  } catch (e) {
+    window.showError(e)
   } finally {
     loading.value = false
   }
@@ -48,6 +69,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('open-settings', onOpenSettings)
+  unlistenClose?.()
 })
 
 function onOpenSettings(): void {
@@ -149,6 +171,7 @@ async function onLoggedIn(): Promise<void> {
 
     <SettingsDialog v-if="showSettings" @close="showSettings = false" @logout="onLogout" />
     <CommandPalette v-if="store.paletteVisible" />
+    <ToastHost />
   </div>
 </template>
 

@@ -83,10 +83,12 @@ impl Core {
         let tx = self.db.tx()?;
         let note = Note::new(uuid_v7(), title.to_string(), note_type.to_string(), now);
         repo::insert_note(&tx, &note)?;
-        if !parent_note_id.is_empty() && parent_note_id != "root" {
-            let branch = Branch::new(uuid_v7(), parent_note_id.to_string(), note.note_id.clone(), 0, now);
-            repo::insert_branch(&tx, &branch)?;
-            let c = change::record_change(
+        // 根级笔记也建 parent='root' 的 branch：树/移动/排序统一走 branch 语义，
+        // move 到根不再因「无 branch」而使笔记从 UI 消失（root 分支在 list_notes 由
+        // parent='root' 分支查询 + 旧数据 NOT EXISTS 兜底共同覆盖）
+        let branch = Branch::new(uuid_v7(), parent_note_id.to_string(), note.note_id.clone(), 0, now);
+        repo::insert_branch(&tx, &branch)?;
+        let c = change::record_change(
     &tx,
     &change::NewChange {
         origin_device_id: &self.origin_device_id,
@@ -98,8 +100,7 @@ impl Core {
         payload: &change::branch_payload(&branch),
     },
 )?;
-            outbox::enqueue(&tx, &c.change_id, now)?;
-        }
+        outbox::enqueue(&tx, &c.change_id, now)?;
         let c = change::record_change(
     &tx,
     &change::NewChange {
@@ -147,46 +148,90 @@ impl Core {
         Ok(updated.meta(0))
     }
 
+    /// 删除笔记（tombstone + DELETE Change）。
+    /// 目录（note_type=folder）级联软删全部子孙：每子孙各自产生 Delete Change，
+    /// 保证多端同步后子树一致不可见。
     pub fn delete_note(&mut self, note_id: &str) -> Result<()> {
         let now = now_ms();
         let note = repo::get_note_required(self.db.connection(), note_id)?;
-        let new_version = note.version + 1;
+        let descendants = if note.note_type == "folder" {
+            repo::list_descendant_note_ids(self.db.connection(), note_id)?
+        } else {
+            Vec::new()
+        };
+        let mut targets: Vec<(String, i64)> = Vec::with_capacity(descendants.len() + 1);
+        targets.push((note_id.to_string(), note.version));
+        for id in &descendants {
+            let child = repo::get_note_required(self.db.connection(), id)?;
+            targets.push((id.clone(), child.version));
+        }
         let tx = self.db.tx()?;
-        repo::set_note_deleted(&tx, note_id, true, new_version, now, Some(&self.origin_device_id))?;
-        let mut updated = note.clone();
-        updated.is_deleted = true;
-        updated.version = new_version;
-        updated.updated_at = now;
-        updated.updated_by = Some(self.origin_device_id.clone());
-        let c = change::record_change(
+        for (target_id, base_version) in &targets {
+            let new_version = base_version + 1;
+            repo::set_note_deleted(&tx, target_id, true, new_version, now, Some(&self.origin_device_id))?;
+            let mut updated = note.clone();
+            updated.note_id = target_id.clone();
+            updated.is_deleted = true;
+            updated.version = *base_version + 1;
+            updated.updated_at = now;
+            updated.updated_by = Some(self.origin_device_id.clone());
+            let c = change::record_change(
     &tx,
     &change::NewChange {
         origin_device_id: &self.origin_device_id,
         entity_type: EntityType::Note,
-        entity_id: note_id,
+        entity_id: target_id,
         operation: Operation::Delete,
-        base_version: note.version,
-        version: new_version,
+        base_version: *base_version,
+        version: *base_version + 1,
         payload: &change::note_payload(&updated),
     },
 )?;
-        outbox::enqueue(&tx, &c.change_id, now)?;
-        fts::sync_note(&tx, note_id)?;
+            outbox::enqueue(&tx, &c.change_id, now)?;
+            fts::sync_note(&tx, target_id)?;
+        }
         tx.commit()?;
         Ok(())
     }
 
+    /// 恢复笔记。若其祖先链上存在仍处于已删除状态的目录（被级联删除），
+    /// 一并恢复祖先链，避免恢复出一个「树中不可达」的幽灵笔记。
     pub fn restore_note(&mut self, note_id: &str) -> Result<NoteMeta> {
         let now = now_ms();
         let note = repo::get_note_required(self.db.connection(), note_id)?;
-        let new_version = note.version + 1;
+        let ancestors = repo::list_deleted_ancestors(self.db.connection(), note_id)?;
         let tx = self.db.tx()?;
+        let mut restored = note.clone();
+        for (target_id, base_version) in &ancestors {
+            let new_version = base_version + 1;
+            repo::set_note_deleted(&tx, target_id, false, new_version, now, Some(&self.origin_device_id))?;
+            let mut updated = note.clone();
+            updated.note_id = target_id.clone();
+            updated.is_deleted = false;
+            updated.version = *base_version + 1;
+            updated.updated_at = now;
+            updated.updated_by = Some(self.origin_device_id.clone());
+            let c = change::record_change(
+    &tx,
+    &change::NewChange {
+        origin_device_id: &self.origin_device_id,
+        entity_type: EntityType::Note,
+        entity_id: target_id,
+        operation: Operation::Update,
+        base_version: *base_version,
+        version: *base_version + 1,
+        payload: &change::note_payload(&updated),
+    },
+)?;
+            outbox::enqueue(&tx, &c.change_id, now)?;
+            fts::sync_note(&tx, target_id)?;
+        }
+        let new_version = note.version + 1;
         repo::set_note_deleted(&tx, note_id, false, new_version, now, Some(&self.origin_device_id))?;
-        let mut updated = note.clone();
-        updated.is_deleted = false;
-        updated.version = new_version;
-        updated.updated_at = now;
-        updated.updated_by = Some(self.origin_device_id.clone());
+        restored.is_deleted = false;
+        restored.version = new_version;
+        restored.updated_at = now;
+        restored.updated_by = Some(self.origin_device_id.clone());
         let c = change::record_change(
     &tx,
     &change::NewChange {
@@ -196,13 +241,13 @@ impl Core {
         operation: Operation::Update,
         base_version: note.version,
         version: new_version,
-        payload: &change::note_payload(&updated),
+        payload: &change::note_payload(&restored),
     },
 )?;
         outbox::enqueue(&tx, &c.change_id, now)?;
         fts::sync_note(&tx, note_id)?;
         tx.commit()?;
-        Ok(updated.meta(0))
+        Ok(restored.meta(0))
     }
 
     /// 写入新 blob（内容寻址），更新 note.blob_id，同事务产生 Change + Outbox
@@ -321,9 +366,38 @@ impl Core {
     }
 
     pub fn move_note_to(&mut self, note_id: &str, new_parent_note_id: &str, new_sort_order: Option<i64>) -> Result<()> {
-        let branch = repo::find_branch_for_note(self.db.connection(), note_id)?
-            .ok_or_else(|| Error::BranchNotFound(note_id.to_string()))?;
-        self.tree_move(&branch.branch_id, new_parent_note_id, new_sort_order)
+        match repo::find_branch_for_note(self.db.connection(), note_id)? {
+            Some(branch) => self.tree_move(&branch.branch_id, new_parent_note_id, new_sort_order),
+            // 历史数据：根级笔记可能无 branch（v1.1.0 前创建）。移动时补建 branch，
+            // 而非报 BranchNotFound 让笔记卡死在根级。
+            None => {
+                let now = now_ms();
+                let tx = self.db.tx()?;
+                let branch = Branch::new(
+                    uuid_v7(),
+                    new_parent_note_id.to_string(),
+                    note_id.to_string(),
+                    new_sort_order.unwrap_or(0),
+                    now,
+                );
+                repo::insert_branch(&tx, &branch)?;
+                let c = change::record_change(
+                    &tx,
+                    &change::NewChange {
+                        origin_device_id: &self.origin_device_id,
+                        entity_type: EntityType::Branch,
+                        entity_id: &branch.branch_id,
+                        operation: Operation::Create,
+                        base_version: 0,
+                        version: 1,
+                        payload: &change::branch_payload(&branch),
+                    },
+                )?;
+                outbox::enqueue(&tx, &c.change_id, now)?;
+                tx.commit()?;
+                Ok(())
+            }
+        }
     }
 
     pub fn attach_bytes(
@@ -554,6 +628,8 @@ impl Core {
 
     /// 冲突副本解决：
     /// - keep_conflict：副本标题/正文覆盖原笔记（产生 Update Change 同步），副本转入回收站
+    ///   正文取副本 blob；若本地缺失（Lazy Download 未拉取），先经 transport 下载，
+    ///   下载失败则报错中止 —— 绝不用空内容覆盖原笔记。
     /// - discard_conflict：副本直接转入回收站（Tombstone + DELETE Change）
     pub fn conflicts_resolve(&mut self, conflict_note_id: &str, keep_conflict: bool) -> Result<()> {
         let note = repo::get_note_required(self.db.connection(), conflict_note_id)?;
@@ -563,10 +639,17 @@ impl Core {
             )));
         };
         if keep_conflict {
-            let content = self.get_content(conflict_note_id)?.1.unwrap_or_default();
-            self.update_note(&orig_id, &note.title)?;
-            if note.blob_id.is_some() {
+            if let Some(blob_id) = note.blob_id.as_deref() {
+                if !self.blob_manager.has_local(blob_id) {
+                    return Err(Error::InvalidArgument(format!(
+                        "conflict blob {blob_id} not downloaded yet; run sync first"
+                    )));
+                }
+                let content = self.get_content(conflict_note_id)?.1.unwrap_or_default();
+                self.update_note(&orig_id, &note.title)?;
                 self.save_content(&orig_id, &content)?;
+            } else {
+                self.update_note(&orig_id, &note.title)?;
             }
         }
         self.delete_note(conflict_note_id)

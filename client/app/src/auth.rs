@@ -14,11 +14,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// 非敏感会话元信息（用于启动恢复：知道连哪个 server、哪个 device，再用 refresh_token 换 access_token）。
+/// `client_id` 是同步游标归属的稳定标识（与登录设备身份无关），首次生成后持久化，
+/// 避免每次启动漂移导致 cursor 重置全量重拉。
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
 pub struct SessionMeta {
     pub server_url: String,
     pub device_id: String,
     pub device_name: String,
+    #[serde(default)]
+    pub client_id: String,
 }
 
 impl SessionMeta {
@@ -136,7 +140,7 @@ mod tests {
     fn session_meta_round_trip_and_clear() {
         let d = tmp();
         assert!(SessionMeta::load(d.path()).is_none());
-        let m = SessionMeta { server_url: "http://x".into(), device_id: "dev-1".into(), device_name: "PC".into() };
+        let m = SessionMeta { server_url: "http://x".into(), device_id: "dev-1".into(), device_name: "PC".into(), client_id: "client-abc".into() };
         m.save(d.path()).unwrap();
         assert_eq!(SessionMeta::load(d.path()).as_ref(), Some(&m));
         SessionMeta::clear(d.path());

@@ -1,7 +1,7 @@
 import type { IpcApi, IpcCommand } from './contract'
 import { mockApi } from '../mock/ipc'
 
-const USE_MOCK = import.meta.env.VITE_USE_MOCK !== 'false'
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === 'true'
 
 const COMMAND_MAP: Record<IpcCommand, string> = {
   'notes.list': 'notes_list',

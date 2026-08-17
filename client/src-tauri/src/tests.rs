@@ -604,7 +604,8 @@ fn push_result_handling_applied_conflict_invalid() {
 fn push_network_error_keeps_outbox_and_local_data() {
     let mut core = core();
     core.create_note("root", "keep me", "text").unwrap();
-    assert_eq!(core.sync_status().unwrap().pending_count, 1);
+    // v1.1.1 起根级笔记也建 root branch → 2 条 change（branch + note）
+    assert_eq!(core.sync_status().unwrap().pending_count, 2);
     let transport = MockTransport::with_push_error("connection refused");
     let engine = SyncEngine::new(Box::new(transport), "client-a");
     let err = core.sync_trigger(&engine);
@@ -614,7 +615,7 @@ fn push_network_error_keeps_outbox_and_local_data() {
         .connection()
         .query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(outbox_rows, 1);
+    assert_eq!(outbox_rows, 2);
     let notes = core.list_notes(None, false).unwrap();
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].title, "keep me");
@@ -1313,4 +1314,83 @@ fn apply_blob_delete_removes_row() {
     };
     apply::apply(&conn, &pd).unwrap();
     assert!(repo::get_blob(&conn, &blob_id).unwrap().is_none(), "DELETE change must remove blob row");
+}
+
+// ─── v1.1.1 回归：级联删除/恢复、根级 branch、冲突空覆盖防护 ───────────────
+
+#[test]
+fn folder_delete_cascades_to_descendants() {
+    let mut core = core();
+    let folder = core.create_note("root", "dir", "folder").unwrap();
+    let child = core.create_note(&folder.note_id, "child", "text").unwrap();
+    let grand = core.create_note(&child.note_id, "grand", "text").unwrap();
+
+    core.delete_note(&folder.note_id).unwrap();
+
+    // 三个节点全部进回收站
+    let trash = core.trash_list().unwrap();
+    let ids: Vec<&str> = trash.iter().map(|n| n.note_id.as_str()).collect();
+    assert!(ids.contains(&folder.note_id.as_str()));
+    assert!(ids.contains(&child.note_id.as_str()));
+    assert!(ids.contains(&grand.note_id.as_str()));
+
+    // 恢复孙子 → 祖先链（目录+子目录）一并复活，不产生幽灵
+    core.restore_note(&grand.note_id).unwrap();
+    let notes = core.list_notes(Some(&folder.note_id), false).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].note_id, child.note_id);
+    let inner = core.list_notes(Some(&child.note_id), false).unwrap();
+    assert_eq!(inner.len(), 1);
+    assert_eq!(inner[0].note_id, grand.note_id);
+}
+
+#[test]
+fn root_note_has_branch_and_survives_move_to_root() {
+    let mut core = core();
+    // v1.1.1 起根级创建即带 parent='root' branch
+    let note = core.create_note("root", "at root", "text").unwrap();
+    let root_list = core.list_notes(None, false).unwrap();
+    assert_eq!(root_list.len(), 1);
+
+    let folder = core.create_note("root", "f", "folder").unwrap();
+    core.move_note_to(&note.note_id, &folder.note_id, None).unwrap();
+    let in_folder = core.list_notes(Some(&folder.note_id), false).unwrap();
+    assert_eq!(in_folder.len(), 1);
+
+    // 移回 root：不再消失（branch 移回 parent='root'，根列表可见；folder 仍在 root）
+    core.move_note_to(&note.note_id, "root", None).unwrap();
+    let back_at_root = core.list_notes(None, false).unwrap();
+    assert_eq!(back_at_root.len(), 2);
+    let ids: Vec<&str> = back_at_root.iter().map(|n| n.note_id.as_str()).collect();
+    assert!(ids.contains(&note.note_id.as_str()), "moved-back note must be visible at root");
+    assert!(ids.contains(&folder.note_id.as_str()));
+}
+
+#[test]
+fn conflict_resolve_refuses_when_conflict_blob_missing() {
+    let mut core = core();
+    let orig = core.create_note("root", "orig", "text").unwrap();
+    core.save_content(&orig.note_id, "v1").unwrap();
+    // 手工造一个冲突副本（正常路径由 apply 在冲突时生成；这里直接构造数据）
+    let conflict = core.create_note("root", "conflict copy", "text").unwrap();
+    core.save_content(&conflict.note_id, "conflict content").unwrap();
+    core.db_mut().connection().execute(
+        "UPDATE notes SET conflict_of_note_id = ?1 WHERE note_id = ?2",
+        rusqlite::params![orig.note_id, conflict.note_id],
+    ).unwrap();
+
+    // 模拟 Lazy Download 未完成：删除本地 blob 文件但保留 note.blob_id
+    {
+        let blob_id: String = core.db().connection()
+            .query_row("SELECT blob_id FROM notes WHERE note_id = ?1", rusqlite::params![conflict.note_id], |r| r.get(0))
+            .unwrap();
+        let path = core.blobs().local_path(&blob_id);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    let err = core.conflicts_resolve(&conflict.note_id, true).unwrap_err();
+    assert!(matches!(err, crate::Error::InvalidArgument(_)), "must refuse instead of empty overwrite: {err}");
+    // 原笔记内容未被破坏
+    let (_, content) = core.get_content(&orig.note_id).unwrap();
+    assert_eq!(content.unwrap(), "v1");
 }

@@ -10,6 +10,7 @@ use lightnote_core::models::{Attribute, ConflictInfo, Note, NoteMeta, SearchResu
 use lightnote_core::sync::UreqTransport;
 use lightnote_core::util::now_ms;
 use serde::Serialize;
+use tauri::Emitter;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -59,6 +60,26 @@ fn with_core<T>(state: &State<AppState>, f: impl FnOnce(&mut Core) -> lightnote_
     f(core)
 }
 
+/// 无 uuid crate 依赖的简易随机 hex（16 字节）：时间戳 + 进程 + 地址熵，仅用于 client_id 生成
+fn uuid_v4_simple() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut buf = [0u8; 16];
+    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    buf[..8].copy_from_slice(&t.as_nanos().to_le_bytes());
+    let pid = std::process::id() as u64;
+    let heap = &buf as *const _ as u64;
+    buf[8..].copy_from_slice(&(pid ^ heap.rotate_left(17)).to_le_bytes());
+    // 简单 xorshift 扩散
+    let mut x = u64::from_le_bytes(buf[8..].try_into().unwrap()) | 1;
+    for b in buf.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *b ^= x as u8;
+    }
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn ensure_connected(state: &State<AppState>) -> lightnote_core::Result<()> {
     let url = state.server_url.lock().expect("url lock").clone();
     if url.is_empty() {
@@ -81,11 +102,27 @@ fn ensure_connected(state: &State<AppState>) -> lightnote_core::Result<()> {
 
 fn run_sync(state: &State<AppState>) -> lightnote_core::Result<lightnote_core::engine::SyncReport> {
     ensure_connected(state)?;
-    let engine_guard = state.engine.lock().expect("engine lock");
-    let engine = engine_guard.as_ref().expect("engine initialized");
-    let blob_guard = state.blob_transport.lock().expect("blob lock");
-    let blob = blob_guard.as_ref().expect("blob initialized");
-    with_core(state, |core| core.sync_trigger_with_blob(engine, blob))
+    let report = {
+        let engine_guard = state.engine.lock().expect("engine lock");
+        let engine = engine_guard.as_ref().expect("engine initialized");
+        let blob_guard = state.blob_transport.lock().expect("blob lock");
+        let blob = blob_guard.as_ref().expect("blob initialized");
+        with_core(state, |core| core.sync_trigger_with_blob(engine, blob))
+    };
+    // 服务端可能提前吊销 access_token/设备（本地 expiry 未到、时钟偏差、服务端重启等）。
+    // sync 传输层把 401/403 映射为 NotAuthenticated —— 此处强制 refresh（轮换新 token、
+    // 重建 transport）后单次重试；refresh 判定 fatal 时 do_refresh 已清会话回登录页。
+    if let Err(lightnote_core::Error::NotAuthenticated) = &report {
+        do_refresh(state)
+            .map_err(|e| lightnote_core::Error::Sync(format!("auth recovery failed: {e}")))?;
+        ensure_connected(state)?;
+        let engine_guard = state.engine.lock().expect("engine lock");
+        let engine = engine_guard.as_ref().expect("engine initialized");
+        let blob_guard = state.blob_transport.lock().expect("blob lock");
+        let blob = blob_guard.as_ref().expect("blob initialized");
+        return with_core(state, |core| core.sync_trigger_with_blob(engine, blob));
+    }
+    report
 }
 
 /// 令 access_token 作废后必须重建 engine/blob transport（它们持有旧 token）。
@@ -279,10 +316,20 @@ fn auth_login(
     let t = parse_login_response(&v)?;
 
     let dir = state.data_dir.lock().expect("dir lock").clone();
+    // client_id：沿用已有（session.json）或首登生成，保持同步游标跨重启稳定
+    let client_id = {
+        let existing = SessionMeta::load(&dir).map(|m| m.client_id).unwrap_or_default();
+        if !existing.is_empty() {
+            existing
+        } else {
+            format!("client-{}", uuid_v4_simple())
+        }
+    };
     let meta = SessionMeta {
         server_url: base.clone(),
         device_id: t.device_id.clone().unwrap_or_default(),
         device_name: device_name.clone(),
+        client_id: client_id.clone(),
     };
     meta.save(&dir).map_err(|e| e.to_string())?;
     if let Some(rt) = &t.refresh_token {
@@ -296,6 +343,7 @@ fn auth_login(
     *state.token_expiry.lock().expect("expiry lock") = now_ms() + t.expires_in * 1000;
     *state.device_id.lock().expect("dev id lock") = t.device_id.unwrap_or_default();
     *state.device_name.lock().expect("dev lock") = device_name;
+    *state.client_id.lock().expect("client id lock") = client_id;
     let mut settings = state.settings.lock().expect("settings lock");
     settings.server_url = base;
     rebuild_transports(&state);
@@ -606,6 +654,14 @@ fn main() {
             sync_status,
             sync_trigger,
         ])
+        .on_window_event(|window, event| {
+            // 关窗前给前端一次 flush 机会：emit 事件 → Vue saveNow（<0.8s 防抖窗内的输入）。
+            // 前端 flush 完成后自行调用 window.destroy() 真正关闭（见 App.vue onCloseRequested）。
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.emit("close-requested", ());
+            }
+        })
         .setup(|app| {
             // 数据目录：优先 LIGHTNOTE_DATA_DIR 环境变量（真机双实例隔离用）；
             // 注意 Windows 下设置 %APPDATA% 无效——Tauri 走 SHGetKnownFolderPath，不读该环境变量
@@ -623,20 +679,32 @@ fn main() {
             *state.token_store.lock().expect("ts lock") =
                 Some(Box::new(FileCredentialStore::new(&dir)));
             // 启动恢复：把上次会话的元信息载入内存（access_token 留给 Vue 调 auth_refresh 换取）
+            let mut client_id = String::new();
+            let mut device_id = String::new();
             if let Some(meta) = SessionMeta::load(&dir) {
                 *state.server_url.lock().expect("url lock") = meta.server_url.clone();
-                *state.device_id.lock().expect("dev id lock") = meta.device_id;
+                *state.device_id.lock().expect("dev id lock") = meta.device_id.clone();
                 *state.device_name.lock().expect("dev lock") = meta.device_name;
                 let mut s = state.settings.lock().expect("settings lock");
                 s.server_url = meta.server_url;
+                client_id = meta.client_id;
+                device_id = meta.device_id;
             }
+            // client_id 游标归属需跨启动稳定；未登录过时也持久化一份，避免首登前编辑即漂移
+            if client_id.is_empty() {
+                client_id = format!("client-{}", uuid_v4_simple());
+            }
+            if device_id.is_empty() {
+                device_id = format!("device-{}", uuid_v4_simple());
+            }
+            *state.client_id.lock().expect("client id lock") = client_id.clone();
             let mut guard = state.core.lock().expect("core lock poisoned");
             *guard = Some(
                 Core::open(
                     &db_path,
                     &blobs_path,
-                    format!("client-{:?}", std::process::id()),
-                    format!("device-{:?}", std::process::id()),
+                    client_id,
+                    device_id,
                 )
                 .expect("open core"),
             );

@@ -80,7 +80,7 @@ function attachmentLabel(n: NoteMeta): string {
   <div class="editor">
     <div v-if="store.currentNote?.noteType === 'folder'" class="folder-placeholder">
       <div class="folder-icon">📁</div>
-      <div class="folder-title">{{ store.currentNote.title }}</div>
+      <input v-model="title" class="title-input folder-title-input" @change="onTitleChange" />
       <div class="folder-hint">这是一个目录，双击树中节点或在其下新建笔记</div>
     </div>
     <template v-else>
@@ -161,10 +161,22 @@ function attachmentLabel(n: NoteMeta): string {
   font-size: 56px;
 }
 
-.folder-title {
-  font-size: 18px;
+.folder-title-input {
+  font-size: 20px;
   font-weight: 600;
-  color: #333;
+  text-align: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 8px;
+  width: 80%;
+  max-width: 420px;
+  background: transparent;
+}
+
+.folder-title-input:hover,
+.folder-title-input:focus {
+  border-color: #1a73e8;
+  background: #fff;
 }
 
 .folder-hint {

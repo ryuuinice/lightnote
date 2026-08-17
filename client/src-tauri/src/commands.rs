@@ -752,23 +752,26 @@ impl Core {
         engine: &SyncEngine,
         blob_transport: &dyn BlobTransport,
     ) -> Result<SyncReport> {
+        // Blob 上传先于 Change push：笔记变更推送后，其他设备会立即懒下载其引用的
+        // blob；先补传可避免「笔记已到、blob 尚不在服务端」的瞬时下载失败。
+        // 上传失败不阻塞 push（懒下载重试会兜底），仅浮出到报告。
+        let (_uploaded, upload_failed) = self.blob_upload_missing(blob_transport)?;
         let report = engine.sync_once(&mut self.db)?;
-        let (uploaded, upload_failed) = self.blob_upload_missing(blob_transport)?;
         let queued = self.blob_queue_enqueue_missing()?;
-        let download_failed = match self.blob_queue_run(blob_transport) {
-            Ok(dl) => dl.failed,
+        let (download_failed, downloaded) = match self.blob_queue_run(blob_transport) {
+            Ok(dl) => (dl.failed, dl.downloaded),
             Err(_) => {
                 // 队列级故障（DB/传输层初始化失败）计为全部待下载数失败
-                queued
+                (queued, 0)
             }
         };
         let report = SyncReport {
             blob_queued: queued,
             blob_upload_failed: upload_failed,
             blob_download_failed: download_failed,
+            blob_downloaded: downloaded,
             ..report
         };
-        let _ = uploaded;
         if let Ok(mut last) = self.last_sync_at.lock() {
             *last = now_ms();
         }

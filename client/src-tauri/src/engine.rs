@@ -9,7 +9,8 @@ use crate::util::now_ms;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncReport {
     pub blob_queued: usize,
     pub pushed: usize,
@@ -21,6 +22,8 @@ pub struct SyncReport {
     pub blob_upload_failed: usize,
     /// blob 下载失败数（懒下载队列执行失败）
     pub blob_download_failed: usize,
+    /// blob 下载成功数（懒下载补全；前端据此决定是否刷新当前笔记内容）
+    pub blob_downloaded: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -46,6 +46,18 @@ export interface SyncStatus {
   failedCount: number
 }
 
+export interface SyncReport {
+  pushed: number
+  pulled: number
+  invalid: number
+  cursor: number
+  pendingRemaining: number
+  blobQueued: number
+  blobUploadFailed: number
+  blobDownloadFailed: number
+  blobDownloaded: number
+}
+
 export interface Settings {
   serverUrl: string
   autoSync: boolean

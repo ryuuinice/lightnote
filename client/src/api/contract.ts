@@ -6,6 +6,7 @@ import type {
   Tag,
   Attribute,
   SyncStatus,
+  SyncReport,
   Settings,
   Device,
   ConflictInfo,
@@ -20,12 +21,12 @@ export interface IpcApi {
   'notes.restore'(params: { noteId: string }): Promise<NoteMeta>
   'notes.saveContent'(params: { noteId: string; content: string }): Promise<string /* blob_id */>
   'notes.getContent'(params: { noteId: string }): Promise<{ blobId: string; content: string | null }>
-  'notes.attach'(params: { parentNoteId: string; name: string; mimeType: string; data: number[] }): Promise<NoteMeta>
+  'notes.attach'(params: { parentNoteId: string; name: string; mimeType: string; dataBase64: string }): Promise<NoteMeta>
   'tree.children'(params: { parentNoteId: string }): Promise<TreeNode[]>
   'tree.move'(params: { noteId: string; newParentNoteId: string; newSortOrder?: number }): Promise<void>
   'search.query'(params: { query: string; limit?: number }): Promise<SearchResult[]>
   'sync.status'(): Promise<SyncStatus>
-  'sync.trigger'(): Promise<string /* 汇总文本 */>
+  'sync.trigger'(): Promise<SyncReport>
   'blobs.get'(params: { blobId: string }): Promise<number[]>
   'blobs.exists'(params: { blobId: string }): Promise<boolean>
   'blobs.download'(params: { blobId: string }): Promise<void>

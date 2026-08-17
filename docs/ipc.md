@@ -237,8 +237,22 @@ SearchResult:
 
 ```text
 参数: 无
-返回: { started: true }
+返回: SyncReport（camelCase，结构化同步报告）
+  {
+    pushed: number,             // 本次 push 成功（APPLIED/ALREADY_APPLIED/CONFLICT）的变更数
+    pulled: number,             // 本次 pull 并应用的远端变更数
+    invalid: number,            // 服务端判 INVALID/未知状态的变更数（进入 24h hold）
+    cursor: number,             // 当前同步游标（server_sequence）
+    pendingRemaining: number,   // outbox 待发送余量
+    blobQueued: number,         // 本次入懒下载队列的 blob 数
+    blobUploadFailed: number,   // blob 补传失败数
+    blobDownloadFailed: number, // 懒下载失败数
+    blobDownloaded: number      // 懒下载成功数（前端据此决定是否刷新内容）
+  }
 ```
+
+前端约定：`pulled > 0 || blobDownloaded > 0` 时刷新树/列表/当前笔记；空同步不触发重载。
+命令为 async（阻塞式同步在后台线程执行，不冻结窗口事件循环）。
 
 ---
 

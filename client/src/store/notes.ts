@@ -329,11 +329,13 @@ export const useNotesStore = defineStore('notes', {
     async triggerSync(): Promise<void> {
       this.sync.state = 'pushing'
       try {
-        await ipc.invoke('sync.trigger')
+        const report = await ipc.invoke('sync.trigger')
         this.sync.state = 'idle'
-        // GUI-003a：同步可能拉入远端变更，立即刷新 UI（树/列表/当前笔记），
-        // 无需用户切换笔记即可看到远端内容
-        await this.refreshAfterSync()
+        // 仅在拉到远端变更或懒下载补全时刷新 UI（树/列表/当前笔记），
+        // 避免空同步的全量重载闪烁
+        if (report.pulled > 0 || report.blobDownloaded > 0) {
+          await this.refreshAfterSync()
+        }
       } catch (error) {
         this.sync.state = 'error'
         throw error

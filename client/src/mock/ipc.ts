@@ -1,4 +1,4 @@
-import type { Note, NoteMeta, TreeNode, SearchResult, Tag, Attribute, SyncStatus, Settings, Device, ConflictInfo } from '../types'
+import type { Note, NoteMeta, TreeNode, SearchResult, Tag, Attribute, SyncStatus, SyncReport, Settings, Device, ConflictInfo } from '../types'
 
 interface MockDb {
   notes: Map<string, Note & { content: string }>
@@ -126,7 +126,7 @@ export const mockApi = {
     if (!n) throw { code: 'NOTE_NOT_FOUND', message: '笔记不存在' }
     return { blobId: n.blobId ?? '', content: n.content ?? '' }
   },
-  async 'notes.attach'(params: { parentNoteId: string; name: string; mimeType: string; data: number[] }): Promise<NoteMeta> {
+  async 'notes.attach'(params: { parentNoteId: string; name: string; mimeType: string; dataBase64: string }): Promise<NoteMeta> {
     const now = Date.now()
     const note: Note & { content: string } = {
       noteId: newId('note'),
@@ -138,7 +138,7 @@ export const mockApi = {
       createdAt: now,
       updatedAt: now,
       content: '',
-      blobId: `sha256:mock-attach-${params.name}-${params.data.length}`,
+      blobId: `sha256:mock-attach-${params.name}-${params.dataBase64.length}`,
     }
     db.notes.set(note.noteId, note)
     db.branches.set(newId('branch'), { branchId: newId('b'), parentNoteId: params.parentNoteId, childNoteId: note.noteId, sortOrder: 0 })
@@ -175,8 +175,8 @@ export const mockApi = {
   async 'sync.status'(): Promise<SyncStatus> {
     return { state: 'idle', lastSyncAt: Date.now(), pendingCount: 0, failedCount: 0 }
   },
-  async 'sync.trigger'(): Promise<string> {
-    return 'pushed=0 pulled=0 cursor=0'
+  async 'sync.trigger'(): Promise<SyncReport> {
+    return { pushed: 0, pulled: 0, invalid: 0, cursor: 0, pendingRemaining: 0, blobQueued: 0, blobUploadFailed: 0, blobDownloadFailed: 0, blobDownloaded: 0 }
   },
   async 'blobs.get'(_params: { blobId: string }): Promise<number[]> {
     return []

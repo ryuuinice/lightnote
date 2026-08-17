@@ -1394,3 +1394,138 @@ fn conflict_resolve_refuses_when_conflict_blob_missing() {
     let (_, content) = core.get_content(&orig.note_id).unwrap();
     assert_eq!(content.unwrap(), "v1");
 }
+
+// ─── v1.1.2 回归：跨设备级联 payload、环防护、空 parent、blob 失败浮出 ──────
+
+/// 跨设备级联删除：A 删目录，B 应用其 Change 后，子孙必须保留各自的标题/类型，
+/// 而不是被目录的字段覆盖（v1.1.1 曾用目录快照 + 换 note_id 的错误 payload）。
+#[test]
+fn cascade_delete_payload_carries_each_descendants_own_snapshot() {
+    let mut a = core();
+    let folder = a.create_note("root", "目录标题", "folder").unwrap();
+    let child_text = a.create_note(&folder.note_id, "子笔记标题", "text").unwrap();
+    a.save_content(&child_text.note_id, "子笔记正文").unwrap();
+    let child_folder = a.create_note(&folder.note_id, "子目录标题", "folder").unwrap();
+    let grandchild = a.create_note(&child_folder.note_id, "孙笔记标题", "text").unwrap();
+
+    a.delete_note(&folder.note_id).unwrap();
+
+    // 取 A 的全部待推送 Change（含级联 DELETE），逐条应用到 B
+    let mut b = core();
+    let ids = outbox::dequeue_batch(a.db().connection(), now_ms(), 100).unwrap();
+    assert!(ids.len() >= 5, "folder + 3 children + blob/note changes, got {}", ids.len());
+    for (seq, change_id) in ids.iter().enumerate() {
+        let ch = change::get_change(a.db().connection(), change_id).unwrap().unwrap();
+        let pc = PullChange {
+            server_sequence: seq as i64 + 1,
+            change_id: ch.change_id.clone(),
+            origin_device_id: Some("device-a".to_string()),
+            entity_type: format!("{:?}", ch.entity_type).to_lowercase(),
+            entity_id: ch.entity_id.clone(),
+            operation: format!("{:?}", ch.operation).to_uppercase(),
+            version: ch.version,
+            payload: ch.payload.clone(),
+        };
+        apply::apply(b.db_mut().connection(), &pc).unwrap();
+    }
+
+    // B 端：全部进回收站，且字段是各节点自己的
+    for (id, title, note_type) in [
+        (&folder.note_id, "目录标题", "folder"),
+        (&child_text.note_id, "子笔记标题", "text"),
+        (&child_folder.note_id, "子目录标题", "folder"),
+        (&grandchild.note_id, "孙笔记标题", "text"),
+    ] {
+        let note = b.get_note(id).unwrap();
+        assert!(note.is_deleted, "{title} must be deleted on B");
+        assert_eq!(note.title, title, "title must survive cascade on B (own snapshot)");
+        assert_eq!(note.note_type, note_type, "type must survive cascade on B (own snapshot)");
+    }
+
+    // 恢复孙笔记：祖先链复活 + 内容未被目录字段污染
+    b.restore_note(&grandchild.note_id).unwrap();
+    let revived = b.get_note(&grandchild.note_id).unwrap();
+    assert!(!revived.is_deleted);
+    assert_eq!(revived.title, "孙笔记标题");
+}
+
+/// 环防护：目录不能移进自己的子孙
+#[test]
+fn tree_move_rejects_cycle() {
+    let mut core = core();
+    let outer = core.create_note("root", "outer", "folder").unwrap();
+    let inner = core.create_note(&outer.note_id, "inner", "folder").unwrap();
+    let note = core.create_note("root", "n", "text").unwrap();
+
+    // outer → inner（自己的子孙）：拒绝
+    let err = core.move_note_to(&outer.note_id, &inner.note_id, None).unwrap_err();
+    assert!(matches!(err, Error::InvalidArgument(_)), "cycle must be rejected: {err}");
+    // 自身 → 自身：拒绝
+    let err = core.move_note_to(&note.note_id, &note.note_id, None);
+    assert!(err.is_err());
+    // 普通移动不受影响
+    core.move_note_to(&note.note_id, &inner.note_id, None).unwrap();
+}
+
+/// 空 parent 归一化为 root：create_note("") 不得产生不可见笔记
+#[test]
+fn create_note_empty_parent_lands_at_root() {
+    let mut core = core();
+    let meta = core.create_note("", "visible?", "text").unwrap();
+    let root_list = core.list_notes(None, false).unwrap();
+    assert!(root_list.iter().any(|n| n.note_id == meta.note_id), "note with empty parent must be visible at root");
+}
+
+/// blob 失败浮出到同步报告：下载失败不得被吞掉变成"已同步"
+#[test]
+fn sync_report_surfaces_blob_failures() {
+    use crate::engine::SyncEngine;
+    use crate::sync::{PullResponse, PushResponse};
+
+    // 只成功 push、pull 恒空的传输层
+    struct OkSyncTransport;
+    impl SyncTransport for OkSyncTransport {
+        fn push_changes(&self, changes: &[PushChange]) -> Result<PushResponse> {
+            Ok(PushResponse {
+                results: changes
+                    .iter()
+                    .map(|c| PushResult {
+                        change_id: c.change_id.clone(),
+                        status: "OK".into(),
+                        server_sequence: Some(1),
+                    })
+                    .collect(),
+            })
+        }
+        fn pull_changes(&self, _after: i64, _limit: u32) -> Result<PullResponse> {
+            Ok(PullResponse { changes: vec![], has_more: false, next_sequence: 1 })
+        }
+    }
+
+    let mut core = core();
+    let transport = MockBlobTransport::new();
+    // 造一个"服务端存在但下载必失败"的缺失 blob：本地 note 引用它但本地无文件
+    {
+        let mut note = Note::new(uuid_v7(), "missing blob".into(), "text".into(), now_ms());
+        let blob_id = "sha256:".to_string() + &crate::util::sha256_hex(b"remote-only");
+        note.blob_id = Some(blob_id.clone());
+        // 模拟 pull 落库形态：blobs 行存在但 storage_path 为空（文件未下载）
+        let blob_row = crate::models::Blob {
+            blob_id: blob_id.clone(),
+            size: 12,
+            mime_type: Some("text/markdown".into()),
+            storage_type: "file".into(),
+            storage_path: String::new(),
+            created_at: now_ms(),
+        };
+        let tx = core.db_mut().tx().unwrap();
+        repo::insert_note(&tx, &note).unwrap();
+        repo::insert_blob(&tx, &blob_row).unwrap();
+        tx.commit().unwrap();
+        transport.fail_download.lock().unwrap().insert(blob_id);
+    }
+
+    let engine = SyncEngine::new(Box::new(OkSyncTransport), "client-x");
+    let report = core.sync_trigger_with_blob(&engine, &transport).unwrap();
+    assert_eq!(report.blob_download_failed, 1, "download failure must surface in report, got {report:?}");
+}

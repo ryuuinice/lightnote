@@ -9,6 +9,9 @@ export const useNotesStore = defineStore('notes', {
     currentNote: null as Note | null,
     currentContent: '',
     dirty: false,
+    /// 正文懒下载未完成：currentContent 为空串仅是占位，绝非真实内容。
+    /// 此状态下禁止保存，否则会用空内容覆盖远端正文。
+    contentMissing: false,
     switching: false, // openNote 异步切换期间为 true：忽略编辑输入，防止被旧内容覆盖
     saveTimer: null as ReturnType<typeof setTimeout> | null,
     searchResults: [] as { noteId: string; title: string; snippet: string; matchedTags: string[] }[],
@@ -81,13 +84,37 @@ export const useNotesStore = defineStore('notes', {
         if (this.currentNote && this.dirty && !(await this.saveContent())) return
         this.selectedNoteId = noteId
         this.currentNote = await ipc.invoke('notes.get', { noteId })
-        const { content } = await ipc.invoke('notes.getContent', { noteId })
-        this.currentContent = content ?? ''
+        const { content, blobId } = await ipc.invoke('notes.getContent', { noteId })
+        if (content === null && blobId) {
+          // Lazy Download 缺失：标记缺失态，后台补拉，绝不把 null 当空内容参与保存
+          this.currentContent = ''
+          this.contentMissing = true
+          void this.fetchMissingContent(noteId, blobId)
+        } else {
+          this.currentContent = content ?? ''
+          this.contentMissing = false
+        }
         this.dirty = false
         this.mobilePane = 'editor'
         await this.loadAttachments(noteId)
+      } catch (e) {
+        window.showError(e)
       } finally {
         this.switching = false
+      }
+    },
+
+    /// 按需补拉缺失正文（Lazy Download）。成功后若用户未编辑则填入。
+    async fetchMissingContent(noteId: string, blobId: string): Promise<void> {
+      try {
+        await ipc.invoke('blobs.download', { blobId })
+        const { content } = await ipc.invoke('notes.getContent', { noteId })
+        if (this.currentNote?.noteId === noteId && this.contentMissing && !this.dirty) {
+          this.currentContent = content ?? ''
+        }
+        this.contentMissing = this.currentNote?.noteId === noteId ? false : this.contentMissing
+      } catch {
+        // 离线/服务端不可达：保持缺失态，EditorPane 显示占位提示，不自动重试
       }
     },
 
@@ -139,6 +166,7 @@ export const useNotesStore = defineStore('notes', {
     updateContent(content: string): void {
       if (this.switching) return // 切换加载中：旧笔记的迟到输入不覆盖待加载内容
       this.currentContent = content
+      this.contentMissing = false // 用户真实输入即视为已有内容
       this.dirty = true
       if (this.saveTimer) clearTimeout(this.saveTimer)
       this.saveTimer = setTimeout(async () => {
@@ -149,6 +177,8 @@ export const useNotesStore = defineStore('notes', {
 
     async saveContent(): Promise<boolean> {
       if (!this.currentNote || !this.dirty) return true
+      // 缺失态的空串不是内容：保存会覆盖远端正文，禁止
+      if (this.contentMissing) return false
       const noteId = this.currentNote.noteId
       const content = this.currentContent
       this.dirty = false
@@ -164,7 +194,12 @@ export const useNotesStore = defineStore('notes', {
 
     async saveNow(): Promise<boolean> {
       if (!this.currentNote) return true
-      this.dirty = true
+      if (this.contentMissing) {
+        // 缺失态没有可保存的本地内容；提示后由调用方决定是否仍要离开
+        window.showError(new Error('正文尚未从服务器下载完成，无法保存'))
+        return false
+      }
+      if (!this.dirty) return true
       return this.saveContent()
     },
 
@@ -174,11 +209,14 @@ export const useNotesStore = defineStore('notes', {
 
     async attachFile(parentNoteId: string, name: string, mimeType: string, data: ArrayBuffer): Promise<void> {
       const bytes = Array.from(new Uint8Array(data))
-      const created = await ipc.invoke('notes.attach', { parentNoteId, name, mimeType, data: bytes })
-      await this.loadTree()
-      await this.loadNotes(parentNoteId)
-      await this.loadAttachments(parentNoteId)
-      if (created.noteId) void created.noteId
+      try {
+        await ipc.invoke('notes.attach', { parentNoteId, name, mimeType, data: bytes })
+        await this.loadTree()
+        await this.loadNotes(parentNoteId)
+        await this.loadAttachments(parentNoteId)
+      } catch (e) {
+        window.showError(new Error(`附件上传失败：${String((e as { message?: string })?.message ?? e)}`))
+      }
     },
 
     async updateTitle(title: string): Promise<void> {
@@ -226,16 +264,25 @@ export const useNotesStore = defineStore('notes', {
     },
 
     async deleteNote(noteId: string): Promise<void> {
-      if (this.saveTimer) {
+      // 仅当删除的是当前笔记时才丢弃其待保存内容；删别的笔记不动当前笔记的保存定时器
+      const isCurrent = this.selectedNoteId === noteId
+      if (isCurrent && this.saveTimer) {
         clearTimeout(this.saveTimer)
         this.saveTimer = null
+        this.dirty = false
       }
-      await ipc.invoke('notes.delete', { noteId })
+      try {
+        await ipc.invoke('notes.delete', { noteId })
+      } catch (e) {
+        window.showError(e)
+        return
+      }
       await this.loadTree()
       await this.loadNotes(this.selectedTreeParent)
-      if (this.selectedNoteId === noteId) {
+      if (isCurrent) {
         this.currentNote = null
         this.currentContent = ''
+        this.contentMissing = false
       }
     },
 
@@ -253,7 +300,11 @@ export const useNotesStore = defineStore('notes', {
     },
 
     async loadTrash(): Promise<void> {
-      this.trash = await ipc.invoke('trash.list')
+      try {
+        this.trash = await ipc.invoke('trash.list')
+      } catch (e) {
+        window.showError(e)
+      }
     },
 
     async search(query: string): Promise<void> {
@@ -261,7 +312,11 @@ export const useNotesStore = defineStore('notes', {
         this.searchResults = []
         return
       }
-      this.searchResults = await ipc.invoke('search.query', { query })
+      try {
+        this.searchResults = await ipc.invoke('search.query', { query })
+      } catch (e) {
+        window.showError(e)
+      }
     },
 
     async triggerSync(): Promise<void> {
@@ -306,7 +361,37 @@ export const useNotesStore = defineStore('notes', {
     },
 
     async updateSettings(patch: Partial<Settings>): Promise<void> {
-      this.settings = await ipc.invoke('settings.update', patch)
+      try {
+        this.settings = await ipc.invoke('settings.update', patch)
+      } catch (e) {
+        window.showError(e)
+      }
+    },
+
+    /// 会话结束（登出/吊销/refresh 失败）后清空全部 UI 状态，回到登录页。
+    /// 覆盖此前 onLogout 手工清不完整的字段（trash/searchResults/attachments 等）。
+    resetAll(): void {
+      if (this.saveTimer) {
+        clearTimeout(this.saveTimer)
+        this.saveTimer = null
+      }
+      this.tree = []
+      this.notes = []
+      this.currentNote = null
+      this.currentContent = ''
+      this.dirty = false
+      this.contentMissing = false
+      this.searchResults = []
+      this.trash = []
+      this.attachments = []
+      this.expanded = new Set<string>(['root'])
+      this.selectedNoteId = ''
+      this.selectedTreeParent = 'root'
+      this.activePanel = 'tree'
+      this.mobilePane = 'navigation'
+      this.paletteVisible = false
+      this.findVisible = false
+      this.sync = { state: 'idle', pendingCount: 0, failedCount: 0 }
     },
   },
 })

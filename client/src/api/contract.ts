@@ -28,6 +28,7 @@ export interface IpcApi {
   'sync.trigger'(): Promise<string /* 汇总文本 */>
   'blobs.get'(params: { blobId: string }): Promise<number[]>
   'blobs.exists'(params: { blobId: string }): Promise<boolean>
+  'blobs.download'(params: { blobId: string }): Promise<void>
   'tags.list'(params: { noteId?: string }): Promise<Tag[]>
   'tags.add'(params: { noteId: string; name: string; value?: string }): Promise<Attribute>
   'tags.remove'(params: { attributeId: string }): Promise<void>

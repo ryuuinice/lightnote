@@ -24,7 +24,7 @@ const commands: PaletteItem[] = [
   { kind: 'command', label: '切换编辑/预览', hint: 'Ctrl+E', run: () => (store.editorMode = store.editorMode === 'preview' ? 'edit' : 'preview') },
   { kind: 'command', label: '强制保存', hint: 'Ctrl+S', run: () => store.saveNow() },
   { kind: 'command', label: '打开回收站', hint: '', run: () => (store.activePanel = 'trash') },
-  { kind: 'command', label: '打开设置', hint: '', run: () => document.dispatchEvent(new CustomEvent('open-settings')) },
+  { kind: 'command', label: '打开设置', hint: '', run: () => window.dispatchEvent(new CustomEvent('open-settings')) },
 ]
 
 const items = ref<PaletteItem[]>([])

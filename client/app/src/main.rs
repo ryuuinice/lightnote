@@ -30,6 +30,8 @@ struct AppState {
     data_dir: Mutex<PathBuf>,    // app_data_dir；session.json / credential 落此
     token_store: Mutex<Option<Box<dyn TokenStore>>>, // 启动时在 setup 注入
     refresh_lock: Mutex<()>,     // 串行化并发 refresh（并发轮换会消费同一 token 导致伪登出）
+    /// setup 注入：会话失效时向前端广播 session-cleared 事件
+    app_handle: Mutex<Option<tauri::AppHandle>>,
 }
 
 #[derive(Serialize, Clone)]
@@ -132,6 +134,8 @@ fn rebuild_transports(state: &State<AppState>) {
 }
 
 /// 清空全部会话状态（access+refresh+元信息），回到登录页。refresh 失败 / logout 调用。
+/// 清理后广播 session-cleared：运行中的 UI 若停留在主界面须切回登录页，
+/// 否则后续所有操作持续失败（设备吊销场景 AUTH-05）。
 fn clear_session(state: &State<AppState>) {
     let dir = state.data_dir.lock().expect("dir lock").clone();
     if let Some(ts) = state.token_store.lock().expect("ts lock").as_ref() {
@@ -145,6 +149,9 @@ fn clear_session(state: &State<AppState>) {
     let mut s = state.settings.lock().expect("settings lock");
     s.server_url = String::new();
     rebuild_transports(state);
+    if let Some(app_handle) = state.app_handle.lock().expect("app handle lock").as_ref() {
+        let _ = app_handle.emit("session-cleared", ());
+    }
 }
 
 /// 用持久化的 refresh_token 换新 access_token（轮换：同时存新 refresh_token）。
@@ -359,8 +366,14 @@ fn settings_get(state: State<AppState>) -> Result<AppSettings, String> {
 fn settings_update(state: State<AppState>, server_url: Option<String>, auto_sync: Option<bool>, sync_interval_sec: Option<u64>) -> Result<AppSettings, String> {
     let mut s = state.settings.lock().expect("settings lock");
     if let Some(u) = server_url {
-        s.server_url = u.trim_end_matches('/').to_string();
+        let trimmed = u.trim_end_matches('/').to_string();
+        let changed = trimmed != s.server_url;
+        s.server_url = trimmed;
         *state.server_url.lock().expect("url lock") = s.server_url.clone();
+        // 地址变更后旧 transport 仍连旧服务器：立即重建，下次 sync 即用新地址
+        if changed {
+            rebuild_transports(&state);
+        }
     }
     if let Some(a) = auto_sync {
         s.auto_sync = a;
@@ -504,6 +517,15 @@ fn blobs_exists(state: State<AppState>, blob_id: String) -> Result<bool, String>
     with_core(&state, |c| c.blobs_exists(&blob_id)).map_err(|e| e.to_string())
 }
 
+/// 按需下载单个 blob（Lazy Download 补拉：打开笔记但本地正文/附件缺失时）
+#[tauri::command]
+fn blobs_download(state: State<AppState>, blob_id: String) -> Result<(), String> {
+    ensure_connected(&state).map_err(|e| e.to_string())?;
+    let blob_guard = state.blob_transport.lock().expect("blob lock");
+    let blob = blob_guard.as_ref().ok_or_else(|| "blob transport not ready".to_string())?;
+    with_core(&state, |c| c.blob_download(blob, &blob_id)).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn settings_logout(state: State<AppState>) -> Result<(), String> {
     clear_session(&state);
@@ -617,6 +639,7 @@ fn main() {
         data_dir: Mutex::new(std::env::temp_dir().join("lightnote-data")),
         token_store: Mutex::new(None),
         refresh_lock: Mutex::new(()),
+        app_handle: Mutex::new(None),
     };
 
     tauri::Builder::default()
@@ -639,6 +662,7 @@ fn main() {
             trash_empty,
             blobs_get,
             blobs_exists,
+            blobs_download,
             settings_logout,
             devices_list,
             devices_revoke,
@@ -681,22 +705,33 @@ fn main() {
             // 启动恢复：把上次会话的元信息载入内存（access_token 留给 Vue 调 auth_refresh 换取）
             let mut client_id = String::new();
             let mut device_id = String::new();
+            let mut meta_changed = false;
+            let mut meta_value = SessionMeta::default();
             if let Some(meta) = SessionMeta::load(&dir) {
                 *state.server_url.lock().expect("url lock") = meta.server_url.clone();
                 *state.device_id.lock().expect("dev id lock") = meta.device_id.clone();
-                *state.device_name.lock().expect("dev lock") = meta.device_name;
+                *state.device_name.lock().expect("dev lock") = meta.device_name.clone();
                 let mut s = state.settings.lock().expect("settings lock");
-                s.server_url = meta.server_url;
-                client_id = meta.client_id;
-                device_id = meta.device_id;
+                s.server_url = meta.server_url.clone();
+                client_id = meta.client_id.clone();
+                device_id = meta.device_id.clone();
+                meta_value = meta;
             }
-            // client_id 游标归属需跨启动稳定；未登录过时也持久化一份，避免首登前编辑即漂移
+            // client_id 游标归属需跨启动稳定；旧版本 session.json 无此字段时
+            // 生成后立即回写，避免每次启动生成新 ID → 游标反复从 0 全量重拉
             if client_id.is_empty() {
                 client_id = format!("client-{}", uuid_v4_simple());
+                meta_value.client_id = client_id.clone();
+                meta_changed = true;
             }
             if device_id.is_empty() {
                 device_id = format!("device-{}", uuid_v4_simple());
             }
+            if meta_changed {
+                let _ = meta_value.save(&dir);
+            }
+            // 注入 AppHandle：clear_session 等运行时路径可向前端广播事件
+            *state.app_handle.lock().expect("app handle lock") = Some(app.handle().clone());
             *state.client_id.lock().expect("client id lock") = client_id.clone();
             let mut guard = state.core.lock().expect("core lock poisoned");
             *guard = Some(

@@ -30,11 +30,17 @@ async function onSave(): Promise<void> {
 
 async function onRevoke(deviceId: string): Promise<void> {
   if (!confirm('吊销该设备？其令牌将立即失效。')) return
-  await ipc.invoke('devices.revoke', { deviceId })
-  devices.value = await ipc.invoke('devices.list')
+  try {
+    await ipc.invoke('devices.revoke', { deviceId })
+    devices.value = await ipc.invoke('devices.list')
+  } catch (e) {
+    window.showError(e)
+  }
 }
 
 async function onLogout(): Promise<void> {
+  // 登出前保存当前编辑，否则未落盘的修改直接丢失
+  await store.saveNow().catch(() => undefined)
   await ipc.invoke('settings.logout').catch(() => undefined)
   emit('logout')
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 
 interface Toast {
   id: number
@@ -26,13 +26,18 @@ function parseError(e: unknown): string {
   return String(e)
 }
 
-window.addEventListener('app-toast', ((e: CustomEvent<string>) => {
-  show(e.detail)
-}) as EventListener)
+function onAppToast(e: Event): void {
+  show((e as CustomEvent<string>).detail)
+}
 
-window.showError = (e: unknown): void => show(parseError(e))
+onMounted(() => {
+  window.addEventListener('app-toast', onAppToast)
+  window.showError = (e: unknown): void => show(parseError(e))
+})
 
-defineExpose({ show })
+onUnmounted(() => {
+  window.removeEventListener('app-toast', onAppToast)
+})
 </script>
 
 <template>

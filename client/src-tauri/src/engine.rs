@@ -17,6 +17,10 @@ pub struct SyncReport {
     pub invalid: usize,
     pub cursor: i64,
     pub pending_remaining: i64,
+    /// blob 上传失败数（本地有、服务端缺，上传出错）
+    pub blob_upload_failed: usize,
+    /// blob 下载失败数（懒下载队列执行失败）
+    pub blob_download_failed: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]

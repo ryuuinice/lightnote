@@ -100,6 +100,11 @@ function attachmentLabel(n: NoteMeta): string {
         <button class="find-btn" @click="store.findVisible = false">✕</button>
       </div>
 
+      <div v-if="store.contentMissing" class="content-missing">
+        正文尚未从服务器下载（离线或上次同步未完成）。联网后点击「立即同步」补拉；
+        在此之前编辑区为空占位，保存已禁用以防覆盖远端内容。
+      </div>
+
       <div v-if="store.editorMode === 'split'" class="split">
         <textarea
           ref="textareaEl"
@@ -213,6 +218,16 @@ function attachmentLabel(n: NoteMeta): string {
   background: #1a73e8;
   color: #fff;
   border-color: #1a73e8;
+}
+
+.content-missing {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid #f0c36d;
+  background: #fdf3dd;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #8a6116;
 }
 
 .findbar {

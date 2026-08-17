@@ -184,6 +184,9 @@ export const mockApi = {
   async 'blobs.exists'(_params: { blobId: string }): Promise<boolean> {
     return true
   },
+  async 'blobs.download'(_params: { blobId: string }): Promise<void> {
+    // mock：数据本就在内存，无需下载
+  },
   async 'tags.list'(params: { noteId?: string }): Promise<Tag[]> {
     const counts = new Map<string, number>()
     for (const a of db.attributes.values()) {

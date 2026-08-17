@@ -20,6 +20,7 @@ const COMMAND_MAP: Record<IpcCommand, string> = {
   'sync.trigger': 'sync_trigger',
   'blobs.get': 'blobs_get',
   'blobs.exists': 'blobs_exists',
+  'blobs.download': 'blobs_download',
   'tags.list': 'tags_list',
   'tags.add': 'tags_add',
   'tags.remove': 'tags_remove',

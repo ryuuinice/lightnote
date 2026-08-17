@@ -80,6 +80,8 @@ impl Core {
 
     pub fn create_note(&mut self, parent_note_id: &str, title: &str, note_type: &str) -> Result<NoteMeta> {
         let now = now_ms();
+        // 空 parent 归一化为 root：根列表只识别 parent='root' 或无 branch 旧数据
+        let parent_note_id = if parent_note_id.is_empty() { "root" } else { parent_note_id };
         let tx = self.db.tx()?;
         let note = Note::new(uuid_v7(), title.to_string(), note_type.to_string(), now);
         repo::insert_note(&tx, &note)?;
@@ -150,7 +152,8 @@ impl Core {
 
     /// 删除笔记（tombstone + DELETE Change）。
     /// 目录（note_type=folder）级联软删全部子孙：每子孙各自产生 Delete Change，
-    /// 保证多端同步后子树一致不可见。
+    /// payload 必须是该子孙自己的完整快照（标题/类型/blob 各归各），
+    /// 否则跨设备 Pull 会把子笔记覆盖成目录的字段。
     pub fn delete_note(&mut self, note_id: &str) -> Result<()> {
         let now = now_ms();
         let note = repo::get_note_required(self.db.connection(), note_id)?;
@@ -159,20 +162,22 @@ impl Core {
         } else {
             Vec::new()
         };
-        let mut targets: Vec<(String, i64)> = Vec::with_capacity(descendants.len() + 1);
-        targets.push((note_id.to_string(), note.version));
+        // 事务外预加载每个目标的完整 Note（payload 数据源）
+        let mut targets: Vec<Note> = Vec::with_capacity(descendants.len() + 1);
+        targets.push(note.clone());
         for id in &descendants {
-            let child = repo::get_note_required(self.db.connection(), id)?;
-            targets.push((id.clone(), child.version));
+            if id == note_id {
+                continue; // CTE 防御：起点不重复处理
+            }
+            targets.push(repo::get_note_required(self.db.connection(), id)?);
         }
         let tx = self.db.tx()?;
-        for (target_id, base_version) in &targets {
-            let new_version = base_version + 1;
-            repo::set_note_deleted(&tx, target_id, true, new_version, now, Some(&self.origin_device_id))?;
-            let mut updated = note.clone();
-            updated.note_id = target_id.clone();
+        for target in &targets {
+            let new_version = target.version + 1;
+            repo::set_note_deleted(&tx, &target.note_id, true, new_version, now, Some(&self.origin_device_id))?;
+            let mut updated = target.clone();
             updated.is_deleted = true;
-            updated.version = *base_version + 1;
+            updated.version = new_version;
             updated.updated_at = now;
             updated.updated_by = Some(self.origin_device_id.clone());
             let c = change::record_change(
@@ -180,15 +185,15 @@ impl Core {
     &change::NewChange {
         origin_device_id: &self.origin_device_id,
         entity_type: EntityType::Note,
-        entity_id: target_id,
+        entity_id: &target.note_id,
         operation: Operation::Delete,
-        base_version: *base_version,
-        version: *base_version + 1,
+        base_version: target.version,
+        version: new_version,
         payload: &change::note_payload(&updated),
     },
 )?;
             outbox::enqueue(&tx, &c.change_id, now)?;
-            fts::sync_note(&tx, target_id)?;
+            fts::sync_note(&tx, &target.note_id)?;
         }
         tx.commit()?;
         Ok(())
@@ -196,19 +201,23 @@ impl Core {
 
     /// 恢复笔记。若其祖先链上存在仍处于已删除状态的目录（被级联删除），
     /// 一并恢复祖先链，避免恢复出一个「树中不可达」的幽灵笔记。
+    /// 祖先的 Update payload 同样使用祖先自己的完整快照。
     pub fn restore_note(&mut self, note_id: &str) -> Result<NoteMeta> {
         let now = now_ms();
         let note = repo::get_note_required(self.db.connection(), note_id)?;
         let ancestors = repo::list_deleted_ancestors(self.db.connection(), note_id)?;
+        let mut ancestor_notes: Vec<Note> = Vec::with_capacity(ancestors.len());
+        for (target_id, _) in &ancestors {
+            ancestor_notes.push(repo::get_note_required(self.db.connection(), target_id)?);
+        }
         let tx = self.db.tx()?;
         let mut restored = note.clone();
-        for (target_id, base_version) in &ancestors {
-            let new_version = base_version + 1;
-            repo::set_note_deleted(&tx, target_id, false, new_version, now, Some(&self.origin_device_id))?;
-            let mut updated = note.clone();
-            updated.note_id = target_id.clone();
+        for target in &ancestor_notes {
+            let new_version = target.version + 1;
+            repo::set_note_deleted(&tx, &target.note_id, false, new_version, now, Some(&self.origin_device_id))?;
+            let mut updated = target.clone();
             updated.is_deleted = false;
-            updated.version = *base_version + 1;
+            updated.version = new_version;
             updated.updated_at = now;
             updated.updated_by = Some(self.origin_device_id.clone());
             let c = change::record_change(
@@ -216,15 +225,15 @@ impl Core {
     &change::NewChange {
         origin_device_id: &self.origin_device_id,
         entity_type: EntityType::Note,
-        entity_id: target_id,
+        entity_id: &target.note_id,
         operation: Operation::Update,
-        base_version: *base_version,
-        version: *base_version + 1,
+        base_version: target.version,
+        version: new_version,
         payload: &change::note_payload(&updated),
     },
 )?;
             outbox::enqueue(&tx, &c.change_id, now)?;
-            fts::sync_note(&tx, target_id)?;
+            fts::sync_note(&tx, &target.note_id)?;
         }
         let new_version = note.version + 1;
         repo::set_note_deleted(&tx, note_id, false, new_version, now, Some(&self.origin_device_id))?;
@@ -330,6 +339,18 @@ impl Core {
     pub fn tree_move(&mut self, branch_id: &str, new_parent_note_id: &str, new_sort_order: Option<i64>) -> Result<()> {
         let now = now_ms();
         let branch = repo::get_branch_required(self.db.connection(), branch_id)?;
+        // 环防护：目标父节点不得是本节点的子孙（含自身）——否则树成环，递归查询失控
+        if branch.child_note_id == new_parent_note_id {
+            return Err(Error::InvalidArgument("cannot move a note into itself".into()));
+        }
+        if repo::list_descendant_note_ids(self.db.connection(), &branch.child_note_id)?
+            .iter()
+            .any(|id| id == new_parent_note_id)
+        {
+            return Err(Error::InvalidArgument(
+                "cannot move a folder into its own descendant".into(),
+            ));
+        }
         let new_version = branch.version + 1;
         let sort_order = new_sort_order.unwrap_or(branch.sort_order);
         let tx = self.db.tx()?;
@@ -606,7 +627,8 @@ impl Core {
         ))
     }
 
-    pub fn blob_upload_missing(&self, transport: &dyn BlobTransport) -> Result<usize> {
+    /// 补传缺失 blob。返回 (成功数, 失败数)——失败不得吞掉，须浮出到同步报告。
+    pub fn blob_upload_missing(&self, transport: &dyn BlobTransport) -> Result<(usize, usize)> {
         let conn = self.db.connection();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT n.blob_id FROM notes n
@@ -616,10 +638,15 @@ impl Core {
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut uploaded = 0;
+        let mut failed = 0;
         for blob_id in ids {
-            if let Ok(true) = self.blob_manager.upload(transport, &blob_id, None) { uploaded += 1 }
+            match self.blob_manager.upload(transport, &blob_id, None) {
+                Ok(true) => uploaded += 1,
+                Ok(false) => {} // 服务端已有，跳过
+                Err(_) => failed += 1,
+            }
         }
-        Ok(uploaded)
+        Ok((uploaded, failed))
     }
 
     pub fn conflicts_list(&self) -> Result<Vec<ConflictInfo>> {
@@ -686,15 +713,22 @@ impl Core {
         blob_transport: &dyn BlobTransport,
     ) -> Result<SyncReport> {
         let report = engine.sync_once(&mut self.db)?;
-        self.blob_upload_missing(blob_transport).unwrap_or(0);
-        let queued = self
-            .blob_queue_enqueue_missing()
-            .unwrap_or(0);
+        let (uploaded, upload_failed) = self.blob_upload_missing(blob_transport)?;
+        let queued = self.blob_queue_enqueue_missing()?;
+        let download_failed = match self.blob_queue_run(blob_transport) {
+            Ok(dl) => dl.failed,
+            Err(_) => {
+                // 队列级故障（DB/传输层初始化失败）计为全部待下载数失败
+                queued
+            }
+        };
         let report = SyncReport {
             blob_queued: queued,
+            blob_upload_failed: upload_failed,
+            blob_download_failed: download_failed,
             ..report
         };
-        self.blob_queue_run(blob_transport).unwrap_or_default();
+        let _ = uploaded;
         if let Ok(mut last) = self.last_sync_at.lock() {
             *last = now_ms();
         }

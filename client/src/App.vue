@@ -19,6 +19,7 @@ const showSettings = ref(false)
 const needsLogin = ref(false)
 const loading = ref(true)
 let unlistenClose: (() => void) | null = null
+let unlistenSession: (() => void) | null = null
 let closing = false
 
 onMounted(async () => {
@@ -32,12 +33,23 @@ onMounted(async () => {
     unlistenClose = await getCurrentWindow().listen<boolean>('close-requested', async () => {
       if (closing) return
       closing = true
+      let ok = true
       try {
-        await store.saveNow()
-      } catch {
-        // 保存失败也放行关闭：数据仍在防抖内容缓冲中，下次启动 outbox 可部分恢复
+        ok = await store.saveNow()
+      } catch (e) {
+        window.showError(e)
+        ok = false
+      }
+      // 保存失败（磁盘错误/正文缺失）：给用户选择，不静默销毁窗口丢稿
+      if (!ok && !confirm('保存失败。仍要关闭窗口吗？（未保存的修改将丢失）')) {
+        closing = false
+        return
       }
       await getCurrentWindow().destroy()
+    })
+    // 设备吊销/refresh 不可恢复：Rust 已清会话并广播，前端立即回登录页
+    unlistenSession = await getCurrentWindow().listen('session-cleared', () => {
+      onLogout()
     })
   } catch {
     // 浏览器/mock 环境：无 Tauri window API
@@ -70,6 +82,7 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('open-settings', onOpenSettings)
   unlistenClose?.()
+  unlistenSession?.()
 })
 
 function onOpenSettings(): void {
@@ -78,10 +91,7 @@ function onOpenSettings(): void {
 
 function onLogout(): void {
   showSettings.value = false
-  store.currentNote = null
-  store.currentContent = ''
-  store.notes = []
-  store.tree = []
+  store.resetAll()
   needsLogin.value = true
 }
 
@@ -171,8 +181,8 @@ async function onLoggedIn(): Promise<void> {
 
     <SettingsDialog v-if="showSettings" @close="showSettings = false" @logout="onLogout" />
     <CommandPalette v-if="store.paletteVisible" />
-    <ToastHost />
   </div>
+  <ToastHost />
 </template>
 
 <style scoped>

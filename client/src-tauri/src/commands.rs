@@ -311,7 +311,7 @@ impl Core {
     },
 )?;
         outbox::enqueue(&tx, &c.change_id, now)?;
-        fts::sync_note(&tx, note_id)?;
+        fts::sync_note_with_content(&tx, note_id, Some(content))?;
         tx.commit()?;
         Ok(blob_id)
     }

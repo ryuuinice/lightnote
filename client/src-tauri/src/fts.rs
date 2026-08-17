@@ -32,6 +32,12 @@ fn cjk_space(text: &str) -> String {
 /// notes 行键稳定性：note_id 为 TEXT PK（隐式 rowid），更新走 UPSERT、删除走 tombstone，
 /// 物理删除仅在 trash_empty 发生（此时由 remove_note 同步清理 FTS 行）。
 pub fn sync_note(conn: &Connection, note_id: &str) -> Result<()> {
+    sync_note_with_content(conn, note_id, None)
+}
+
+/// content：调用方已持有正文时直传（save_content 路径），跳过从磁盘重读整个 blob；
+/// None 时按 storage_path 回读（pull 应用 / 懒下载补全路径）。
+pub fn sync_note_with_content(conn: &Connection, note_id: &str, content: Option<&str>) -> Result<()> {
     let rid: Option<i64> = conn
         .query_row(
             "SELECT rowid FROM notes WHERE note_id = ?1",
@@ -51,15 +57,9 @@ pub fn sync_note(conn: &Connection, note_id: &str) -> Result<()> {
     if note.is_deleted {
         return Ok(());
     }
-    let content = if matches!(note.note_type.as_str(), "text" | "markdown") {
-        note.blob_id
-            .as_ref()
-            .and_then(|bid| repo::get_blob(conn, bid).ok().flatten())
-            .and_then(|b| std::fs::read(&b.storage_path).ok())
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default()
-    } else {
-        String::new()
+    let content = match content {
+        Some(c) => c.to_string(),
+        None => raw_content(conn, &note),
     };
     let content = cjk_space(&content);
     let tags = repo::list_tag_names(conn, note_id)?;
@@ -166,47 +166,29 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Search
     if match_query.is_empty() {
         return Ok(vec![]);
     }
+    // snippet() 直接在 SQLite 内生成命中片段：省去每条结果从磁盘读整个 blob
+    // + get_note 的 N+1 查询；JOIN notes 同时过滤掉 FTS 残行指向已物理删除 note 的情况
     let mut stmt = conn.prepare(
-        "SELECT note_id FROM note_fts WHERE note_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+        "SELECT f.note_id, n.title, snippet(note_fts, 2, '', '', '…', 14)
+         FROM note_fts f JOIN notes n ON n.note_id = f.note_id
+         WHERE note_fts MATCH ?1 ORDER BY rank LIMIT ?2",
     )?;
-    let ids: Vec<String> = stmt
-        .query_map(rusqlite::params![match_query, limit as i64], |r| r.get::<_, String>(0))?
+    let rows = stmt
+        .query_map(rusqlite::params![match_query, limit as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let tokens = raw_tokens(query);
-    let mut results = Vec::with_capacity(ids.len());
-    for note_id in ids {
-        let Some(note) = repo::get_note(conn, &note_id)? else {
-            continue;
-        };
-        let content = raw_content(conn, &note);
-        let snippet = make_snippet(&content, tokens.first().map(String::as_str).unwrap_or(""));
+    let mut results = Vec::with_capacity(rows.len());
+    for (note_id, title, snippet) in rows {
         let tags = repo::list_tag_names(conn, &note_id)?;
         let matched_tags: Vec<String> = tags.into_iter().filter(|t| tag_matches(t, &tokens)).collect();
         results.push(SearchResult {
             note_id,
-            title: note.title,
+            title,
             snippet,
             matched_tags,
         });
     }
     Ok(results)
-}
-
-fn make_snippet(content: &str, token: &str) -> String {
-    if token.is_empty() {
-        return content.chars().take(60).collect();
-    }
-    if let Some(idx) = content.find(token) {
-        let start = idx.saturating_sub(20);
-        let end = (idx + token.len() + 40).min(content.len());
-        let mut out: String = content.chars().skip(start).take(end - start).collect();
-        if start > 0 {
-            out.insert(0, '…');
-        }
-        if end < content.len() {
-            out.push('…');
-        }
-        return out;
-    }
-    content.chars().take(60).collect()
 }
